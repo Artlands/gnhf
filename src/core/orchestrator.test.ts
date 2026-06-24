@@ -81,6 +81,8 @@ const runInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/run-abc/commit-message",
   commitMessage: undefined,
+  tierConfigPath: "/repo/.gnhf/runs/run-abc/tier-config.json",
+  tieredModels: undefined,
 };
 
 function createSuccessResult(summary = "done"): AgentResult {

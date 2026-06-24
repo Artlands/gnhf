@@ -6,6 +6,7 @@ import {
   type AgentOutput,
   type TokenUsage,
 } from "./agents/types.js";
+import type { AgentProvider } from "./agents/factory.js";
 import { redactAgentSpecForLogs, type Config } from "./config.js";
 import type { RunInfo } from "./run.js";
 import { appendNotes, toStringArray } from "./run.js";
@@ -90,9 +91,30 @@ type RunIterationResult =
   | { type: "stopped" }
   | { type: "aborted"; reason: string };
 
+function isAgentProvider(value: Agent | AgentProvider): value is AgentProvider {
+  return (
+    typeof (value as AgentProvider).getAgentFor === "function" &&
+    typeof (value as AgentProvider).defaultTier === "string"
+  );
+}
+
+function wrapAgentAsProvider(agent: Agent): AgentProvider {
+  return {
+    defaultTier: "default",
+    tiers: ["default"],
+    tieredModels: undefined,
+    getAgentFor: () => agent,
+    // Pass through the agent's close directly so microtask timing matches
+    // the original (Agent-only) shutdown path — adding an extra async layer
+    // here perturbs tests that flush an exact number of microtasks between
+    // close resolution and the "stopped" event.
+    close: agent.close ? agent.close.bind(agent) : () => undefined,
+  };
+}
+
 export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private config: Config;
-  private agent: Agent;
+  private provider: AgentProvider;
   private runInfo: RunInfo;
   private cwd: string;
   private prompt: string;
@@ -131,7 +153,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
   constructor(
     config: Config,
-    agent: Agent,
+    agentOrProvider: Agent | AgentProvider,
     runInfo: RunInfo,
     prompt: string,
     cwd: string,
@@ -140,7 +162,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   ) {
     super();
     this.config = config;
-    this.agent = agent;
+    this.provider = isAgentProvider(agentOrProvider)
+      ? agentOrProvider
+      : wrapAgentAsProvider(agentOrProvider);
     this.runInfo = runInfo;
     this.prompt = prompt;
     this.cwd = cwd;
@@ -150,6 +174,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.runInfo.baseCommit,
       this.cwd,
     );
+  }
+
+  private getActiveAgent(): Agent {
+    return this.provider.getAgentFor(this.provider.defaultTier);
   }
 
   getState(): OrchestratorState {
@@ -249,7 +277,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit("state", this.getState());
 
     appendDebugLog("orchestrator:start", {
-      agent: redactAgentSpecForLogs(this.agent.name),
+      agent: redactAgentSpecForLogs(this.getActiveAgent().name),
       runId: this.runInfo.runId,
       startIteration: this.state.currentIteration,
       maxIterations: this.limits.maxIterations,
@@ -461,15 +489,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       `iteration-${this.state.currentIteration}.jsonl`,
     );
 
+    const agent = this.getActiveAgent();
     const agentStartedAt = Date.now();
     appendDebugLog("agent:run:start", {
       iteration: this.state.currentIteration,
-      agent: redactAgentSpecForLogs(this.agent.name),
+      agent: redactAgentSpecForLogs(agent.name),
       logPath,
     });
 
     try {
-      const result = await this.agent.run(prompt, this.cwd, {
+      const result = await agent.run(prompt, this.cwd, {
         onUsage,
         onMessage,
         signal: this.activeAbortController.signal,
@@ -807,7 +836,7 @@ ${this.pendingCommitFailure}
 
   private async closeAgent(): Promise<void> {
     try {
-      await this.agent.close?.();
+      await this.provider.close();
     } catch (err) {
       appendDebugLog("agent:close:error", {
         error: serializeError(err),

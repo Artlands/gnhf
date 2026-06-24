@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import {
   buildAgentOutputSchema,
   type AgentOutputCommitField,
+  type AgentOutputTierField,
 } from "./agents/types.js";
 import {
   CONVENTIONAL_COMMIT_MESSAGE,
@@ -19,6 +20,7 @@ import {
   type CommitMessageConfig,
 } from "./commit-message.js";
 import { findLegacyRunBaseCommit, getHeadCommit } from "./git.js";
+import type { TieredModelsConfig } from "./tiered-models.js";
 
 export interface RunInfo {
   runId: string;
@@ -33,6 +35,8 @@ export interface RunInfo {
   stopWhen: string | undefined;
   commitMessagePath: string;
   commitMessage: CommitMessageConfig | undefined;
+  tierConfigPath: string;
+  tieredModels: TieredModelsConfig | undefined;
 }
 
 export interface RunMetadata {
@@ -47,6 +51,7 @@ export interface RunMetadata {
 const LOG_FILENAME = "gnhf.log";
 const STOP_WHEN_FILENAME = "stop-when";
 const COMMIT_MESSAGE_FILENAME = "commit-message";
+const TIER_CONFIG_FILENAME = "tier-config.json";
 
 function writeSchemaFile(
   schemaPath: string,
@@ -58,6 +63,9 @@ function writeSchemaFile(
       buildAgentOutputSchema({
         includeStopField: schemaOptions.includeStopField,
         commitFields: schemaOptions.commitFields,
+        ...(schemaOptions.tierField === undefined
+          ? {}
+          : { tierField: schemaOptions.tierField }),
       }),
       null,
       2,
@@ -72,6 +80,8 @@ export interface RunSchemaOptions {
   commitMessage?: CommitMessageConfig;
   stopWhen?: string;
   clearStopWhen?: boolean;
+  tierField?: AgentOutputTierField;
+  tieredModels?: TieredModelsConfig;
 }
 
 function readStopWhen(stopWhenPath: string): string | undefined {
@@ -154,6 +164,27 @@ function writeCommitMessageMetadata(
   );
 }
 
+function writeTierConfigMetadata(
+  tierConfigPath: string,
+  tieredModels: TieredModelsConfig | undefined,
+): void {
+  if (tieredModels === undefined) return;
+  writeFileSync(
+    tierConfigPath,
+    `${JSON.stringify(tieredModels, null, 2)}\n`,
+    "utf-8",
+  );
+}
+
+function readTierConfigMetadata(
+  tierConfigPath: string,
+): TieredModelsConfig | undefined {
+  if (!existsSync(tierConfigPath)) return undefined;
+  const raw = readFileSync(tierConfigPath, "utf-8");
+  if (raw.trim() === "") return undefined;
+  return JSON.parse(raw) as TieredModelsConfig;
+}
+
 function ensureRunMetadataIgnored(cwd: string): void {
   const excludePath = execFileSync(
     "git",
@@ -225,6 +256,15 @@ export function setupRun(
   const commitMessage = schemaOptions.commitMessage;
   writeCommitMessageMetadata(commitMessagePath, commitMessage);
 
+  const tierConfigPath = join(runDir, TIER_CONFIG_FILENAME);
+  const hasStoredTierConfig = existsSync(tierConfigPath);
+  const tieredModels = hasStoredTierConfig
+    ? readTierConfigMetadata(tierConfigPath)
+    : schemaOptions.tieredModels;
+  if (!hasStoredTierConfig && schemaOptions.tieredModels !== undefined) {
+    writeTierConfigMetadata(tierConfigPath, schemaOptions.tieredModels);
+  }
+
   return {
     runId,
     runDir,
@@ -238,6 +278,8 @@ export function setupRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    tierConfigPath,
+    tieredModels,
   };
 }
 
@@ -270,6 +312,11 @@ export function resumeRun(
   }
   const commitMessagePath = join(runDir, COMMIT_MESSAGE_FILENAME);
   const commitMessage = resolveRunCommitMessage(commitMessagePath, schemaPath);
+  const tierConfigPath = join(runDir, TIER_CONFIG_FILENAME);
+  // Absence is the backwards-compat signal for "tiered models off for this
+  // run" — older runs started before this feature shipped have no
+  // tier-config.json. Frozen tier config on disk wins over live config.
+  const tieredModels = readTierConfigMetadata(tierConfigPath);
   writeSchemaFile(schemaPath, {
     ...schemaOptions,
     commitMessage,
@@ -290,6 +337,8 @@ export function resumeRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    tierConfigPath,
+    tieredModels,
   };
 }
 

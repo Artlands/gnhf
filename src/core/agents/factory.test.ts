@@ -81,7 +81,12 @@ vi.mock("./acp.js", () => {
   return { AcpAgent };
 });
 
-import { createAgent } from "./factory.js";
+import {
+  createAgent,
+  createAgentProvider,
+  resolveTier,
+  DEFAULT_TIER_NAME,
+} from "./factory.js";
 import { AcpAgent } from "./acp.js";
 import { ClaudeAgent } from "./claude.js";
 import { CopilotAgent } from "./copilot.js";
@@ -90,6 +95,7 @@ import { OpenCodeAgent } from "./opencode.js";
 import { PiAgent } from "./pi.js";
 import { RovoDevAgent } from "./rovodev.js";
 import type { RunInfo } from "../run.js";
+import type { Config } from "../config.js";
 
 const stubRunInfo: RunInfo = {
   runId: "test-run",
@@ -104,6 +110,8 @@ const stubRunInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/test-run/commit-message",
   commitMessage: undefined,
+  tierConfigPath: "/repo/.gnhf/runs/test-run/tier-config.json",
+  tieredModels: undefined,
 };
 
 const acpSessionStateDir = join(stubRunInfo.runDir, "acp-sessions");
@@ -427,5 +435,222 @@ describe("createAgent", () => {
       runId: stubRunInfo.runId,
       sessionStateDir: acpSessionStateDir,
     });
+  });
+});
+
+function makeConfig(overrides: Partial<Config> = {}): Config {
+  return {
+    agent: "claude",
+    agentPathOverride: {},
+    agentArgsOverride: {},
+    acpRegistryOverrides: {},
+    maxConsecutiveFailures: 3,
+    preventSleep: true,
+    ...overrides,
+  };
+}
+
+describe("resolveTier", () => {
+  it("falls back to today's wiring when tieredModels is undefined", () => {
+    const config = makeConfig({
+      agent: "claude",
+      agentPathOverride: { claude: "/usr/local/bin/claude" },
+      agentArgsOverride: { claude: ["--foo"] },
+      acpRegistryOverrides: { staging: "node x.mjs" },
+    });
+    const resolved = resolveTier(config, DEFAULT_TIER_NAME);
+    expect(resolved).toEqual({
+      tierName: DEFAULT_TIER_NAME,
+      agent: "claude",
+      agentPath: "/usr/local/bin/claude",
+      agentArgs: ["--foo"],
+      acpRegistryOverrides: { staging: "node x.mjs" },
+      local: false,
+    });
+  });
+
+  it("uses tier.agent when set, overriding top-level config.agent", () => {
+    const config = makeConfig({
+      agent: "claude",
+      tieredModels: {
+        enabled: true,
+        defaultTier: "cheap",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          cheap: { agent: "acp:local-qwen" },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "cheap");
+    expect(resolved.agent).toBe("acp:local-qwen");
+    expect(resolved.local).toBe(false);
+  });
+
+  it("propagates local: true onto the resolved tier", () => {
+    const config = makeConfig({
+      tieredModels: {
+        enabled: true,
+        defaultTier: "cheap",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          cheap: { agent: "acp:local-qwen", local: true },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "cheap");
+    expect(resolved.local).toBe(true);
+  });
+
+  it("merges top-level acpRegistryOverrides with tier-scoped, tier wins on conflict", () => {
+    const config = makeConfig({
+      acpRegistryOverrides: { staging: "global cmd" },
+      tieredModels: {
+        enabled: true,
+        defaultTier: "cheap",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          cheap: {
+            agent: "acp:staging",
+            acpRegistryOverrides: { staging: "tier cmd" },
+          },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "cheap");
+    expect(resolved.acpRegistryOverrides).toEqual({ staging: "tier cmd" });
+  });
+
+  it("splices top-level args before tier args", () => {
+    const config = makeConfig({
+      agent: "claude",
+      agentArgsOverride: { claude: ["--foo", "--bar"] },
+      tieredModels: {
+        enabled: true,
+        defaultTier: "complex",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          complex: { args: { claude: ["--baz"] } },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "complex");
+    expect(resolved.agentArgs).toEqual(["--foo", "--bar", "--baz"]);
+  });
+
+  it("drops a top-level --model when the tier also sets --model (paired form)", () => {
+    const config = makeConfig({
+      agent: "claude",
+      agentArgsOverride: { claude: ["--model", "sonnet", "--foo"] },
+      tieredModels: {
+        enabled: true,
+        defaultTier: "complex",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          complex: { args: { claude: ["--model", "opus"] } },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "complex");
+    expect(resolved.agentArgs).toEqual(["--foo", "--model", "opus"]);
+  });
+
+  it("drops a top-level --model=foo when the tier sets --model (equals form)", () => {
+    const config = makeConfig({
+      agent: "claude",
+      agentArgsOverride: { claude: ["--model=sonnet", "--foo"] },
+      tieredModels: {
+        enabled: true,
+        defaultTier: "complex",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          complex: { args: { claude: ["--model", "opus"] } },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "complex");
+    expect(resolved.agentArgs).toEqual(["--foo", "--model", "opus"]);
+  });
+
+  it("does not drop top-level --model when the tier does not set one", () => {
+    const config = makeConfig({
+      agent: "claude",
+      agentArgsOverride: { claude: ["--model", "sonnet"] },
+      tieredModels: {
+        enabled: true,
+        defaultTier: "simple",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          simple: { args: { claude: ["--foo"] } },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "simple");
+    expect(resolved.agentArgs).toEqual(["--model", "sonnet", "--foo"]);
+  });
+});
+
+describe("createAgentProvider", () => {
+  it("returns a single-tier 'default' provider when tieredModels is undefined", () => {
+    const config = makeConfig();
+    const provider = createAgentProvider(config, stubRunInfo, {
+      includeStopField: false,
+    });
+    expect(provider.defaultTier).toBe(DEFAULT_TIER_NAME);
+    expect(provider.tiers).toEqual([DEFAULT_TIER_NAME]);
+    expect(provider.tieredModels).toBeUndefined();
+    const agent = provider.getAgentFor(DEFAULT_TIER_NAME);
+    expect(agent.name).toBe("claude");
+  });
+
+  it("caches per-tier agents and only constructs each one once", () => {
+    const config = makeConfig({
+      tieredModels: {
+        enabled: true,
+        defaultTier: "complex",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          complex: { args: { claude: ["--model", "opus"] } },
+          simple: { args: { claude: ["--model", "sonnet"] } },
+        },
+      },
+    });
+    const provider = createAgentProvider(config, stubRunInfo, {
+      includeStopField: false,
+    });
+    expect(provider.tiers).toEqual(["complex", "simple"]);
+    const before = (ClaudeAgent as unknown as { mock: { calls: unknown[] } })
+      .mock.calls.length;
+    const a1 = provider.getAgentFor("complex");
+    const a2 = provider.getAgentFor("complex");
+    expect(a1).toBe(a2);
+    const after = (ClaudeAgent as unknown as { mock: { calls: unknown[] } })
+      .mock.calls.length;
+    expect(after - before).toBe(1);
+  });
+
+  it("close() invokes each cached agent's close exactly once", async () => {
+    const closeOne = vi.fn();
+    const closeTwo = vi.fn();
+    const config = makeConfig({
+      tieredModels: {
+        enabled: true,
+        defaultTier: "complex",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          complex: { args: { claude: ["--model", "opus"] } },
+          simple: { args: { claude: ["--model", "sonnet"] } },
+        },
+      },
+    });
+    const provider = createAgentProvider(config, stubRunInfo, {
+      includeStopField: false,
+    });
+    const a1 = provider.getAgentFor("complex");
+    const a2 = provider.getAgentFor("simple");
+    a1.close = closeOne;
+    a2.close = closeTwo;
+    await provider.close();
+    expect(closeOne).toHaveBeenCalledTimes(1);
+    expect(closeTwo).toHaveBeenCalledTimes(1);
   });
 });

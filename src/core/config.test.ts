@@ -13,7 +13,7 @@ vi.mock("node:os", () => ({
 }));
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAgentSpec, loadConfig } from "./config.js";
+import { isAgentSpec, isReservedAgentArg, loadConfig } from "./config.js";
 
 const mockMkdirSync = vi.mocked(mkdirSync);
 const mockReadFileSync = vi.mocked(readFileSync);
@@ -532,6 +532,112 @@ describe("loadConfig", () => {
   ])("rejects invalid acpRegistryOverrides: $label", ({ yaml, expected }) => {
     mockReadFileSync.mockReturnValue(yaml);
     expect(() => loadConfig()).toThrow(expected);
+  });
+});
+
+describe("isReservedAgentArg", () => {
+  it("does not reserve --model for claude when tieredModels is off (current behavior)", () => {
+    expect(
+      isReservedAgentArg("claude", "--model", { tieredModelsEnabled: false }),
+    ).toBe(false);
+    expect(isReservedAgentArg("claude", "--model")).toBe(false);
+  });
+
+  it("reserves --model for claude when tieredModels.enabled is true", () => {
+    expect(
+      isReservedAgentArg("claude", "--model", { tieredModelsEnabled: true }),
+    ).toBe(true);
+    expect(
+      isReservedAgentArg("claude", "--model=opus", {
+        tieredModelsEnabled: true,
+      }),
+    ).toBe(true);
+  });
+
+  it("reserves both -m and --model for codex when tieredModels.enabled is true", () => {
+    expect(
+      isReservedAgentArg("codex", "-m", { tieredModelsEnabled: true }),
+    ).toBe(true);
+    expect(
+      isReservedAgentArg("codex", "--model", { tieredModelsEnabled: true }),
+    ).toBe(true);
+  });
+
+  it("still rejects core gnhf-managed flags regardless of tieredModelsEnabled", () => {
+    expect(isReservedAgentArg("claude", "-p")).toBe(true);
+    expect(
+      isReservedAgentArg("claude", "-p", { tieredModelsEnabled: true }),
+    ).toBe(true);
+  });
+
+  it("never reserves model-class flags for managed-server agents", () => {
+    expect(
+      isReservedAgentArg("opencode", "--model", { tieredModelsEnabled: true }),
+    ).toBe(false);
+    expect(
+      isReservedAgentArg("rovodev", "--model", { tieredModelsEnabled: true }),
+    ).toBe(false);
+  });
+});
+
+describe("loadConfig with tieredModels", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("rejects top-level agentArgsOverride containing --model when tieredModels.enabled", () => {
+    mockReadFileSync.mockReturnValue(
+      [
+        "tieredModels:",
+        "  enabled: true",
+        "  defaultTier: complex",
+        "  tiers:",
+        "    complex: {}",
+        "agentArgsOverride:",
+        "  claude:",
+        "    - --model",
+        "    - opus",
+        "",
+      ].join("\n"),
+    );
+
+    expect(() => loadConfig()).toThrow(
+      /tieredModels\.tiers\.<name>\.args\.claude/,
+    );
+  });
+
+  it("accepts a minimal enabled tieredModels block", () => {
+    mockReadFileSync.mockReturnValue(
+      [
+        "tieredModels:",
+        "  enabled: true",
+        "  defaultTier: complex",
+        "  tiers:",
+        "    complex:",
+        "      args:",
+        "        claude:",
+        "          - --model",
+        "          - opus",
+        "",
+      ].join("\n"),
+    );
+
+    const config = loadConfig();
+    expect(config.tieredModels?.enabled).toBe(true);
+    expect(config.tieredModels?.defaultTier).toBe("complex");
+    expect(config.tieredModels?.tiers.complex?.args?.claude).toEqual([
+      "--model",
+      "opus",
+    ]);
+  });
+
+  it("strips a disabled tieredModels block from the resolved config", () => {
+    mockReadFileSync.mockReturnValue(
+      ["tieredModels:", "  enabled: false", ""].join("\n"),
+    );
+
+    const config = loadConfig();
+    expect(config.tieredModels).toBeUndefined();
   });
 });
 

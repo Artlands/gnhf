@@ -50,12 +50,13 @@ import {
 } from "./core/run.js";
 import { readStdinText } from "./core/stdin.js";
 import { startSleepPrevention } from "./core/sleep.js";
-import { createAgent } from "./core/agents/factory.js";
+import { createAgentProvider } from "./core/agents/factory.js";
 import { getDefaultTelemetry, initDefaultTelemetry } from "./core/telemetry.js";
 import {
   getCommitMessageSchemaFields,
   type CommitMessageConfig,
 } from "./core/commit-message.js";
+import type { TieredModelsConfig } from "./core/tiered-models.js";
 import { Orchestrator } from "./core/orchestrator.js";
 import { renderExitSummary } from "./core/exit-summary.js";
 import { MockOrchestrator } from "./mock-orchestrator.js";
@@ -180,6 +181,7 @@ function redactDebugArgs(args: string[]): string[] {
 function buildSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  tieredModels?: TieredModelsConfig,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
   return {
@@ -187,12 +189,14 @@ function buildSchemaOptions(
     ...(stopWhen === undefined ? {} : { stopWhen }),
     ...(commitMessage === undefined ? {} : { commitMessage }),
     ...(commitFields.length === 0 ? {} : { commitFields }),
+    ...(tieredModels === undefined ? {} : { tieredModels }),
   };
 }
 
 function buildResumeSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  tieredModels?: TieredModelsConfig,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
   if (stopWhen === "") {
@@ -201,9 +205,10 @@ function buildResumeSchemaOptions(
       clearStopWhen: true,
       ...(commitMessage === undefined ? {} : { commitMessage }),
       ...(commitFields.length === 0 ? {} : { commitFields }),
+      ...(tieredModels === undefined ? {} : { tieredModels }),
     };
   }
-  return buildSchemaOptions(stopWhen, commitMessage);
+  return buildSchemaOptions(stopWhen, commitMessage, tieredModels);
 }
 
 function initializeNewBranch(
@@ -711,6 +716,7 @@ program
       let schemaOptions = buildSchemaOptions(
         effectiveStopWhen,
         effectiveCommitMessage,
+        config.tieredModels,
       );
 
       let runInfo;
@@ -733,7 +739,11 @@ program
           prompt,
           cwd,
           schemaOptions,
-          buildResumeSchemaOptions(options.stopWhen, effectiveCommitMessage),
+          buildResumeSchemaOptions(
+            options.stopWhen,
+            effectiveCommitMessage,
+            config.tieredModels,
+          ),
         );
         runInfo = wt.runInfo;
         effectiveCwd = wt.effectiveCwd;
@@ -747,6 +757,7 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            runInfo.tieredModels,
           );
           startIteration = getLastIterationNumber(runInfo);
           console.error(
@@ -781,7 +792,11 @@ program
         const existing = resumeCurrentBranchRun(
           prompt,
           cwd,
-          buildResumeSchemaOptions(options.stopWhen, effectiveCommitMessage),
+          buildResumeSchemaOptions(
+            options.stopWhen,
+            effectiveCommitMessage,
+            config.tieredModels,
+          ),
         );
 
         if (existing) {
@@ -791,6 +806,7 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            existing.tieredModels,
           );
           startIteration = getLastIterationNumber(existing);
         } else {
@@ -812,12 +828,14 @@ program
             buildResumeSchemaOptions(
               options.stopWhen,
               existingMetadata.commitMessage,
+              config.tieredModels,
             ),
           );
           const resumeStopWhen = existing.stopWhen;
           const resumeSchemaOptions = buildSchemaOptions(
             resumeStopWhen,
             existing.commitMessage,
+            existing.tieredModels,
           );
           prompt = existingPrompt;
           runInfo = existing;
@@ -844,12 +862,14 @@ program
               buildResumeSchemaOptions(
                 options.stopWhen,
                 existingMetadata.commitMessage,
+                config.tieredModels,
               ),
             );
             const resumeStopWhen = existing.stopWhen;
             const resumeSchemaOptions = buildSchemaOptions(
               resumeStopWhen,
               existing.commitMessage,
+              existing.tieredModels,
             );
             runInfo = setupRun(
               existingRunId,
@@ -868,6 +888,7 @@ program
             schemaOptions = buildSchemaOptions(
               effectiveStopWhen,
               effectiveCommitMessage,
+              config.tieredModels,
             );
             runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
           } else {
@@ -955,12 +976,9 @@ program
         gnhfVersion: packageVersion,
       });
 
-      const nativeAgent = getNativeAgentName(config.agent);
-      const agent = createAgent(
-        config.agent,
+      const provider = createAgentProvider(
+        { ...config, commitMessage: effectiveCommitMessage },
         runInfo,
-        nativeAgent ? config.agentPathOverride[nativeAgent] : undefined,
-        nativeAgent ? config.agentArgsOverride?.[nativeAgent] : undefined,
         {
           ...schemaOptions,
           acpRegistryOverrides: config.acpRegistryOverrides,
@@ -968,7 +986,7 @@ program
       );
       const orchestrator = new Orchestrator(
         { ...config, commitMessage: effectiveCommitMessage },
-        agent,
+        provider,
         runInfo,
         prompt,
         effectiveCwd,

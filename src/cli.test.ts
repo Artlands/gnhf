@@ -35,6 +35,48 @@ const TEST_REDACT_AGENT_SPEC = (name: string) => {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(target) ? name : "acp:custom";
 };
 
+// Builds the same createAgentProvider shape the real factory returns, while
+// routing every agent construction through the test's `createAgent` mock so
+// existing per-call assertions on createAgent continue to verify the right
+// (spec, runInfo, pathOverride, argsOverride, options) tuple.
+function makeCreateAgentProviderMock(createAgentMock: unknown) {
+  const createAgent = createAgentMock as (...args: unknown[]) => unknown;
+  return vi.fn(
+    (
+      cfg: {
+        agent: string;
+        agentPathOverride?: Record<string, string>;
+        agentArgsOverride?: Record<string, string[]>;
+        acpRegistryOverrides?: Record<string, string>;
+      },
+      runInfo: unknown,
+      options: { acpRegistryOverrides?: Record<string, string> },
+    ) => {
+      const isNative = TEST_AGENT_NAMES.includes(cfg.agent);
+      const pathOverride = isNative
+        ? cfg.agentPathOverride?.[cfg.agent]
+        : undefined;
+      const argsOverride = isNative
+        ? cfg.agentArgsOverride?.[cfg.agent]
+        : undefined;
+      const agent = createAgent(
+        cfg.agent,
+        runInfo,
+        pathOverride,
+        argsOverride,
+        options,
+      ) as { name: string; close?: () => Promise<void> | void };
+      return {
+        defaultTier: "default",
+        tiers: ["default"],
+        tieredModels: undefined,
+        getAgentFor: () => agent,
+        close: agent.close ? agent.close.bind(agent) : () => undefined,
+      };
+    },
+  );
+}
+
 const stubRunInfo: RunInfo = {
   runId: "run-abc",
   runDir: "/repo/.gnhf/runs/run-abc",
@@ -48,6 +90,8 @@ const stubRunInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/run-abc/commit-message",
   commitMessage: undefined,
+  tierConfigPath: "/repo/.gnhf/runs/run-abc/tier-config.json",
+  tieredModels: undefined,
 };
 
 interface CliMockOverrides {
@@ -203,7 +247,10 @@ async function runCliWithMocks(
     getLastIterationNumber,
   }));
   vi.doMock("./core/stdin.js", () => ({ readStdinText }));
-  vi.doMock("./core/agents/factory.js", () => ({ createAgent }));
+  vi.doMock("./core/agents/factory.js", () => ({
+    createAgent,
+    createAgentProvider: makeCreateAgentProviderMock(createAgent),
+  }));
   vi.doMock("./core/sleep.js", () => ({
     startSleepPrevention,
   }));
@@ -404,9 +451,13 @@ async function runSigintCliTest({
     resumeRun: vi.fn(),
     getLastIterationNumber: vi.fn(() => 0),
   }));
-  vi.doMock("./core/agents/factory.js", () => ({
-    createAgent: vi.fn(() => ({ name: "claude" })),
-  }));
+  vi.doMock("./core/agents/factory.js", () => {
+    const createAgent = vi.fn(() => ({ name: "claude" }));
+    return {
+      createAgent,
+      createAgentProvider: makeCreateAgentProviderMock(createAgent),
+    };
+  });
   vi.doMock("./core/orchestrator.js", () => ({
     Orchestrator: class MockOrchestrator {
       start = vi.fn(() => {
@@ -562,7 +613,10 @@ async function runCliResumeWithActualRun(
     createWorktree: vi.fn(),
     removeWorktree: vi.fn(),
   }));
-  vi.doMock("./core/agents/factory.js", () => ({ createAgent }));
+  vi.doMock("./core/agents/factory.js", () => ({
+    createAgent,
+    createAgentProvider: makeCreateAgentProviderMock(createAgent),
+  }));
   vi.doMock("./core/sleep.js", () => ({
     startSleepPrevention: vi.fn(() =>
       Promise.resolve({ type: "skipped", reason: "unsupported" }),
@@ -1584,9 +1638,13 @@ describe("cli", () => {
     vi.doMock("./core/stdin.js", () => ({
       readStdinText: vi.fn(() => Promise.resolve("")),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -1738,9 +1796,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -1875,9 +1937,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2008,9 +2074,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2136,9 +2206,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2261,9 +2335,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2379,9 +2457,13 @@ describe("cli", () => {
       resumeRun,
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention: vi.fn(),
     }));
@@ -2551,9 +2633,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/orchestrator.js", () => ({
       Orchestrator: class MockOrchestrator {
         start = vi.fn(() => new Promise<void>(() => {}));
@@ -2698,9 +2784,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/orchestrator.js", () => ({
       Orchestrator: class MockOrchestrator {
         start = vi.fn(
@@ -2872,9 +2962,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/orchestrator.js", () => ({
       Orchestrator: class MockOrchestrator {
         start = vi.fn(() => Promise.resolve());
@@ -3025,9 +3119,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doUnmock("./renderer.js");
     vi.doMock("./core/orchestrator.js", () => {
       return {
