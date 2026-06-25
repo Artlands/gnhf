@@ -188,6 +188,57 @@ describe("normalizeTieredModelsConfig", () => {
     expect(result?.tiers.simple?.args?.claude).toEqual(["--model", "sonnet"]);
   });
 
+  it("rejects tier args for an agent that is not the effective tier agent", () => {
+    expect(() =>
+      normalizeTieredModelsConfig(
+        {
+          enabled: true,
+          defaultTier: "complex",
+          tiers: {
+            complex: {
+              agent: "codex",
+              args: { claude: ["--model", "opus"] },
+            },
+          },
+        },
+        "claude",
+      ),
+    ).toThrow(/args\.claude.*effective tier agent "codex"/);
+  });
+
+  it("rejects tier args that do not match the inherited top-level agent", () => {
+    expect(() =>
+      normalizeTieredModelsConfig(
+        {
+          enabled: true,
+          defaultTier: "complex",
+          tiers: {
+            complex: { args: { codex: ["--model", "gpt-5"] } },
+          },
+        },
+        "claude",
+      ),
+    ).toThrow(/args\.codex.*effective tier agent "claude"/);
+  });
+
+  it("rejects args on ACP tiers", () => {
+    expect(() =>
+      normalizeTieredModelsConfig(
+        {
+          enabled: true,
+          defaultTier: "cheap",
+          tiers: {
+            cheap: {
+              agent: "acp:local-qwen",
+              args: { claude: ["--model", "sonnet"] },
+            },
+          },
+        },
+        "claude",
+      ),
+    ).toThrow(/tier args are only supported for native agents/);
+  });
+
   it("requires every tier to swap the agent when top-level agent is a managed-server agent", () => {
     expect(() =>
       normalizeTieredModelsConfig(

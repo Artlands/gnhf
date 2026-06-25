@@ -249,6 +249,30 @@ function isManagedServerAgent(agent: AgentSpec): boolean {
   return agent === "rovodev" || agent === "opencode" || isAcpSpec(agent);
 }
 
+function validateTierArgsMatchEffectiveAgent(
+  tiers: Record<string, TierDef>,
+  topLevelAgent: AgentSpec,
+): void {
+  for (const [name, tier] of Object.entries(tiers)) {
+    if (tier.args === undefined) continue;
+
+    const effective = effectiveTierAgent(tier, topLevelAgent);
+    if (isAcpSpec(effective)) {
+      throw new InvalidConfigError(
+        `Invalid config value for tieredModels.tiers.${name}.args: tier args are only supported for native agents, but this tier uses "${effective}"`,
+      );
+    }
+
+    for (const agent of Object.keys(tier.args)) {
+      if (agent !== effective) {
+        throw new InvalidConfigError(
+          `Invalid config value for tieredModels.tiers.${name}.args.${agent}: tier args must match the effective tier agent "${effective}"`,
+        );
+      }
+    }
+  }
+}
+
 export function normalizeTieredModelsConfig(
   value: unknown,
   topLevelAgent: AgentSpec,
@@ -342,6 +366,8 @@ export function normalizeTieredModelsConfig(
       );
     }
   }
+
+  validateTierArgsMatchEffectiveAgent(tiers, topLevelAgent);
 
   // Managed-server / ACP agents at the top level can only be used with tiers
   // that swap the whole agent. Args-only tiering would need per-tier servers
