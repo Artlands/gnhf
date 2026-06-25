@@ -96,6 +96,7 @@ import { PiAgent } from "./pi.js";
 import { RovoDevAgent } from "./rovodev.js";
 import type { RunInfo } from "../run.js";
 import type { Config } from "../config.js";
+import type { TieredModelsConfig } from "../tiered-models.js";
 
 const stubRunInfo: RunInfo = {
   runId: "test-run",
@@ -115,6 +116,12 @@ const stubRunInfo: RunInfo = {
 };
 
 const acpSessionStateDir = join(stubRunInfo.runDir, "acp-sessions");
+
+function stubRunInfoWithTieredModels(
+  tieredModels: TieredModelsConfig,
+): RunInfo {
+  return { ...stubRunInfo, tieredModels };
+}
 
 const noStopSchema = {
   type: "object",
@@ -630,20 +637,25 @@ describe("createAgentProvider", () => {
   });
 
   it("caches per-tier agents and only constructs each one once", () => {
-    const config = makeConfig({
-      tieredModels: {
-        enabled: true,
-        defaultTier: "complex",
-        classifier: { mode: "agent-self" },
-        tiers: {
-          complex: { args: { claude: ["--model", "opus"] } },
-          simple: { args: { claude: ["--model", "sonnet"] } },
-        },
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: {
+        complex: { args: { claude: ["--model", "opus"] } },
+        simple: { args: { claude: ["--model", "sonnet"] } },
       },
+    };
+    const config = makeConfig({
+      tieredModels,
     });
-    const provider = createAgentProvider(config, stubRunInfo, {
-      includeStopField: false,
-    });
+    const provider = createAgentProvider(
+      config,
+      stubRunInfoWithTieredModels(tieredModels),
+      {
+        includeStopField: false,
+      },
+    );
     expect(provider.tiers).toEqual(["complex", "simple"]);
     const before = (ClaudeAgent as unknown as { mock: { calls: unknown[] } })
       .mock.calls.length;
@@ -658,20 +670,25 @@ describe("createAgentProvider", () => {
   it("close() invokes each cached agent's close exactly once", async () => {
     const closeOne = vi.fn();
     const closeTwo = vi.fn();
-    const config = makeConfig({
-      tieredModels: {
-        enabled: true,
-        defaultTier: "complex",
-        classifier: { mode: "agent-self" },
-        tiers: {
-          complex: { args: { claude: ["--model", "opus"] } },
-          simple: { args: { claude: ["--model", "sonnet"] } },
-        },
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: {
+        complex: { args: { claude: ["--model", "opus"] } },
+        simple: { args: { claude: ["--model", "sonnet"] } },
       },
+    };
+    const config = makeConfig({
+      tieredModels,
     });
-    const provider = createAgentProvider(config, stubRunInfo, {
-      includeStopField: false,
-    });
+    const provider = createAgentProvider(
+      config,
+      stubRunInfoWithTieredModels(tieredModels),
+      {
+        includeStopField: false,
+      },
+    );
     const a1 = provider.getAgentFor("complex");
     const a2 = provider.getAgentFor("simple");
     a1.close = closeOne;
@@ -679,5 +696,27 @@ describe("createAgentProvider", () => {
     await provider.close();
     expect(closeOne).toHaveBeenCalledTimes(1);
     expect(closeTwo).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps legacy runs on the default tier when live tieredModels is enabled", () => {
+    const config = makeConfig({
+      tieredModels: {
+        enabled: true,
+        defaultTier: "complex",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          complex: { args: { claude: ["--model", "opus"] } },
+        },
+      },
+    });
+
+    const provider = createAgentProvider(config, stubRunInfo, {
+      includeStopField: false,
+    });
+
+    expect(provider.defaultTier).toBe(DEFAULT_TIER_NAME);
+    expect(provider.tiers).toEqual([DEFAULT_TIER_NAME]);
+    expect(provider.tieredModels).toBeUndefined();
+    expect(provider.getAgentFor(DEFAULT_TIER_NAME).name).toBe("claude");
   });
 });

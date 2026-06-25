@@ -37,6 +37,7 @@ import {
   toStringArray,
 } from "./run.js";
 import { CONVENTIONAL_COMMIT_MESSAGE } from "./commit-message.js";
+import { InvalidConfigError } from "./config-errors.js";
 
 const P = "/project";
 
@@ -508,6 +509,55 @@ describe("resumeRun", () => {
     const info = resumeRun("run-abc", P, { includeStopField: false });
 
     expect(info.tieredModels).toEqual(frozen);
+  });
+
+  it("validates frozen tier-config.json metadata before returning it", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const tierConfigPath = join(runDir, "tier-config.json");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === tierConfigPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === tierConfigPath
+        ? JSON.stringify({
+            enabled: true,
+            defaultTier: "default",
+            classifier: { mode: "agent-self" },
+            tiers: { default: {} },
+          })
+        : "",
+    );
+
+    expect(() =>
+      resumeRun("run-abc", P, {
+        includeStopField: false,
+        topLevelAgent: "claude",
+      }),
+    ).toThrow(InvalidConfigError);
+    expect(() =>
+      resumeRun("run-abc", P, {
+        includeStopField: false,
+        topLevelAgent: "claude",
+      }),
+    ).toThrow(/Invalid run metadata.*tier-config\.json.*default.*reserved/);
+  });
+
+  it("reports invalid tier-config.json JSON as run metadata", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const tierConfigPath = join(runDir, "tier-config.json");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === tierConfigPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === tierConfigPath ? "{" : "",
+    );
+
+    expect(() =>
+      resumeRun("run-abc", P, {
+        includeStopField: false,
+        topLevelAgent: "claude",
+      }),
+    ).toThrow(/Invalid run metadata.*tier-config\.json/);
   });
 });
 

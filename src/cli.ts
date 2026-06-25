@@ -181,6 +181,7 @@ function redactDebugArgs(args: string[]): string[] {
 function buildSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  topLevelAgent: AgentSpec,
   tieredModels?: TieredModelsConfig,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
@@ -189,6 +190,7 @@ function buildSchemaOptions(
     ...(stopWhen === undefined ? {} : { stopWhen }),
     ...(commitMessage === undefined ? {} : { commitMessage }),
     ...(commitFields.length === 0 ? {} : { commitFields }),
+    topLevelAgent,
     ...(tieredModels === undefined ? {} : { tieredModels }),
   };
 }
@@ -196,6 +198,7 @@ function buildSchemaOptions(
 function buildResumeSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
+  topLevelAgent: AgentSpec,
   tieredModels?: TieredModelsConfig,
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
@@ -205,10 +208,16 @@ function buildResumeSchemaOptions(
       clearStopWhen: true,
       ...(commitMessage === undefined ? {} : { commitMessage }),
       ...(commitFields.length === 0 ? {} : { commitFields }),
+      topLevelAgent,
       ...(tieredModels === undefined ? {} : { tieredModels }),
     };
   }
-  return buildSchemaOptions(stopWhen, commitMessage, tieredModels);
+  return buildSchemaOptions(
+    stopWhen,
+    commitMessage,
+    topLevelAgent,
+    tieredModels,
+  );
 }
 
 function initializeNewBranch(
@@ -716,6 +725,7 @@ program
       let schemaOptions = buildSchemaOptions(
         effectiveStopWhen,
         effectiveCommitMessage,
+        config.agent,
         config.tieredModels,
       );
 
@@ -742,6 +752,7 @@ program
           buildResumeSchemaOptions(
             options.stopWhen,
             effectiveCommitMessage,
+            config.agent,
             config.tieredModels,
           ),
         );
@@ -757,6 +768,7 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            config.agent,
             runInfo.tieredModels,
           );
           startIteration = getLastIterationNumber(runInfo);
@@ -795,6 +807,7 @@ program
           buildResumeSchemaOptions(
             options.stopWhen,
             effectiveCommitMessage,
+            config.agent,
             config.tieredModels,
           ),
         );
@@ -806,6 +819,7 @@ program
           schemaOptions = buildSchemaOptions(
             effectiveStopWhen,
             effectiveCommitMessage,
+            config.agent,
             existing.tieredModels,
           );
           startIteration = getLastIterationNumber(existing);
@@ -828,6 +842,7 @@ program
             buildResumeSchemaOptions(
               options.stopWhen,
               existingMetadata.commitMessage,
+              config.agent,
               config.tieredModels,
             ),
           );
@@ -835,6 +850,7 @@ program
           const resumeSchemaOptions = buildSchemaOptions(
             resumeStopWhen,
             existing.commitMessage,
+            config.agent,
             existing.tieredModels,
           );
           prompt = existingPrompt;
@@ -862,6 +878,7 @@ program
               buildResumeSchemaOptions(
                 options.stopWhen,
                 existingMetadata.commitMessage,
+                config.agent,
                 config.tieredModels,
               ),
             );
@@ -869,6 +886,7 @@ program
             const resumeSchemaOptions = buildSchemaOptions(
               resumeStopWhen,
               existing.commitMessage,
+              config.agent,
               existing.tieredModels,
             );
             runInfo = setupRun(
@@ -888,6 +906,7 @@ program
             schemaOptions = buildSchemaOptions(
               effectiveStopWhen,
               effectiveCommitMessage,
+              config.agent,
               config.tieredModels,
             );
             runInfo = initializeNewBranch(prompt, cwd, schemaOptions);

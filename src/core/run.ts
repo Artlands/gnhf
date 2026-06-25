@@ -19,7 +19,10 @@ import {
   getCommitMessageSchemaFields,
   type CommitMessageConfig,
 } from "./commit-message.js";
+import { InvalidConfigError } from "./config-errors.js";
 import { findLegacyRunBaseCommit, getHeadCommit } from "./git.js";
+import type { AgentSpec } from "./config.js";
+import { normalizeTieredModelsConfig } from "./tiered-models-config.js";
 import type { TieredModelsConfig } from "./tiered-models.js";
 
 export interface RunInfo {
@@ -82,6 +85,7 @@ export interface RunSchemaOptions {
   clearStopWhen?: boolean;
   tierField?: AgentOutputTierField;
   tieredModels?: TieredModelsConfig;
+  topLevelAgent?: AgentSpec;
 }
 
 function readStopWhen(stopWhenPath: string): string | undefined {
@@ -178,11 +182,19 @@ function writeTierConfigMetadata(
 
 function readTierConfigMetadata(
   tierConfigPath: string,
+  topLevelAgent: AgentSpec = "claude",
 ): TieredModelsConfig | undefined {
   if (!existsSync(tierConfigPath)) return undefined;
   const raw = readFileSync(tierConfigPath, "utf-8");
   if (raw.trim() === "") return undefined;
-  return JSON.parse(raw) as TieredModelsConfig;
+  try {
+    return normalizeTieredModelsConfig(JSON.parse(raw), topLevelAgent);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidConfigError(
+      `Invalid run metadata in ${tierConfigPath}: ${message}`,
+    );
+  }
 }
 
 function ensureRunMetadataIgnored(cwd: string): void {
@@ -259,7 +271,7 @@ export function setupRun(
   const tierConfigPath = join(runDir, TIER_CONFIG_FILENAME);
   const hasStoredTierConfig = existsSync(tierConfigPath);
   const tieredModels = hasStoredTierConfig
-    ? readTierConfigMetadata(tierConfigPath)
+    ? readTierConfigMetadata(tierConfigPath, schemaOptions.topLevelAgent)
     : schemaOptions.tieredModels;
   if (!hasStoredTierConfig && schemaOptions.tieredModels !== undefined) {
     writeTierConfigMetadata(tierConfigPath, schemaOptions.tieredModels);
@@ -316,7 +328,10 @@ export function resumeRun(
   // Absence is the backwards-compat signal for "tiered models off for this
   // run" — older runs started before this feature shipped have no
   // tier-config.json. Frozen tier config on disk wins over live config.
-  const tieredModels = readTierConfigMetadata(tierConfigPath);
+  const tieredModels = readTierConfigMetadata(
+    tierConfigPath,
+    schemaOptions.topLevelAgent,
+  );
   writeSchemaFile(schemaPath, {
     ...schemaOptions,
     commitMessage,

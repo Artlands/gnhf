@@ -208,7 +208,7 @@ export function createAgentProvider(
   runInfo: RunInfo,
   options: CreateAgentOptions,
 ): AgentProvider {
-  const tieredModels = runInfo.tieredModels ?? config.tieredModels;
+  const tieredModels = runInfo.tieredModels;
   const active = isTieredModelsActive(tieredModels);
   const tiers = active ? Object.keys(tieredModels.tiers) : [DEFAULT_TIER_NAME];
   const defaultTier = active ? tieredModels.defaultTier : DEFAULT_TIER_NAME;
