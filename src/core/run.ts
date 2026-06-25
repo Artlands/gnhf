@@ -180,6 +180,21 @@ function writeTierConfigMetadata(
   );
 }
 
+function materializeTierConfigFallbackAgents(
+  tieredModels: TieredModelsConfig,
+  topLevelAgent: AgentSpec,
+): TieredModelsConfig {
+  return {
+    ...tieredModels,
+    tiers: Object.fromEntries(
+      Object.entries(tieredModels.tiers).map(([name, tier]) => [
+        name,
+        { ...tier, agent: tier.agent ?? topLevelAgent },
+      ]),
+    ),
+  };
+}
+
 function readTierConfigMetadata(
   tierConfigPath: string,
   topLevelAgent: AgentSpec = "claude",
@@ -188,7 +203,13 @@ function readTierConfigMetadata(
   const raw = readFileSync(tierConfigPath, "utf-8");
   if (raw.trim() === "") return undefined;
   try {
-    return normalizeTieredModelsConfig(JSON.parse(raw), topLevelAgent);
+    const tieredModels = normalizeTieredModelsConfig(
+      JSON.parse(raw),
+      topLevelAgent,
+    );
+    return tieredModels === undefined
+      ? undefined
+      : materializeTierConfigFallbackAgents(tieredModels, topLevelAgent);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new InvalidConfigError(
@@ -272,9 +293,14 @@ export function setupRun(
   const hasStoredTierConfig = existsSync(tierConfigPath);
   const tieredModels = hasStoredTierConfig
     ? readTierConfigMetadata(tierConfigPath, schemaOptions.topLevelAgent)
-    : schemaOptions.tieredModels;
+    : schemaOptions.tieredModels === undefined
+      ? undefined
+      : materializeTierConfigFallbackAgents(
+          schemaOptions.tieredModels,
+          schemaOptions.topLevelAgent ?? "claude",
+        );
   if (!hasStoredTierConfig && schemaOptions.tieredModels !== undefined) {
-    writeTierConfigMetadata(tierConfigPath, schemaOptions.tieredModels);
+    writeTierConfigMetadata(tierConfigPath, tieredModels);
   }
 
   return {

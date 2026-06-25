@@ -508,7 +508,10 @@ describe("resumeRun", () => {
 
     const info = resumeRun("run-abc", P, { includeStopField: false });
 
-    expect(info.tieredModels).toEqual(frozen);
+    expect(info.tieredModels).toEqual({
+      ...frozen,
+      tiers: { complex: { agent: "claude", ...frozen.tiers.complex } },
+    });
   });
 
   it("validates frozen tier-config.json metadata before returning it", () => {
@@ -579,6 +582,7 @@ describe("setupRun tieredModels persistence", () => {
     setupRun("run-abc", "prompt", "abc123", P, {
       includeStopField: false,
       tieredModels,
+      topLevelAgent: "claude",
     });
 
     const tierCall = mockWriteFileSync.mock.calls.find(
@@ -586,7 +590,38 @@ describe("setupRun tieredModels persistence", () => {
         typeof call[0] === "string" && call[0].endsWith("tier-config.json"),
     );
     expect(tierCall).toBeDefined();
-    expect(JSON.parse((tierCall![1] as string).trim())).toEqual(tieredModels);
+    expect(JSON.parse((tierCall![1] as string).trim())).toEqual({
+      ...tieredModels,
+      tiers: { complex: { agent: "claude", ...tieredModels.tiers.complex } },
+    });
+  });
+
+  it("freezes the top-level fallback agent into each tier", () => {
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: {
+        complex: { args: { codex: ["--model", "gpt-5"] } },
+        hosted: { agent: "acp:local-qwen" as const },
+      },
+    };
+
+    setupRun("run-abc", "prompt", "abc123", P, {
+      includeStopField: false,
+      tieredModels,
+      topLevelAgent: "codex",
+    });
+
+    const tierCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("tier-config.json"),
+    );
+    expect(tierCall).toBeDefined();
+    expect(JSON.parse((tierCall![1] as string).trim()).tiers).toEqual({
+      complex: { agent: "codex", args: { codex: ["--model", "gpt-5"] } },
+      hosted: { agent: "acp:local-qwen" },
+    });
   });
 
   it("does not write tier-config.json when tieredModels is undefined", () => {
@@ -633,7 +668,10 @@ describe("setupRun tieredModels persistence", () => {
       expect.any(String),
       "utf-8",
     );
-    expect(info.tieredModels).toEqual(stored);
+    expect(info.tieredModels).toEqual({
+      ...stored,
+      tiers: { complex: { agent: "claude" } },
+    });
   });
 });
 

@@ -719,4 +719,48 @@ describe("createAgentProvider", () => {
     expect(provider.tieredModels).toBeUndefined();
     expect(provider.getAgentFor(DEFAULT_TIER_NAME).name).toBe("claude");
   });
+
+  it("uses the frozen tier agent instead of the live top-level agent on resume", () => {
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: {
+        complex: {
+          agent: "claude" as const,
+          args: { claude: ["--model", "opus"] },
+        },
+      },
+    };
+    const config = makeConfig({
+      agent: "codex",
+      agentArgsOverride: {
+        claude: ["--top-claude"],
+        codex: ["--top-codex"],
+      },
+      tieredModels: {
+        enabled: true,
+        defaultTier: "cheap",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          cheap: { agent: "codex", args: { codex: ["--model", "gpt-5"] } },
+        },
+      },
+    });
+
+    const provider = createAgentProvider(
+      config,
+      stubRunInfoWithTieredModels(tieredModels),
+      {
+        includeStopField: false,
+      },
+    );
+
+    const agent = provider.getAgentFor("complex");
+    expect(agent.name).toBe("claude");
+    const lastCall = vi.mocked(ClaudeAgent).mock.calls.at(-1);
+    expect(lastCall?.[0]).toMatchObject({
+      extraArgs: ["--top-claude", "--model", "opus"],
+    });
+  });
 });
