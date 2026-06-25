@@ -88,6 +88,19 @@ describe("normalizeTieredModelsConfig", () => {
     ).toThrow(/defaultTier.*not a configured tier/);
   });
 
+  it("rejects 'default' as a tier name because it collides with the gnhf sentinel", () => {
+    expect(() =>
+      normalizeTieredModelsConfig(
+        {
+          enabled: true,
+          defaultTier: "default",
+          tiers: { default: {} },
+        },
+        "claude",
+      ),
+    ).toThrow(/reserved by gnhf/);
+  });
+
   it("rejects tier names that contain invalid characters", () => {
     expect(() =>
       normalizeTieredModelsConfig(

@@ -571,6 +571,33 @@ describe("resolveTier", () => {
     expect(resolved.agentArgs).toEqual(["--foo", "--model", "opus"]);
   });
 
+  it("returns the named tier's content (not the legacy fallback) when tieredModels is active", () => {
+    const config = makeConfig({
+      agent: "claude",
+      agentArgsOverride: { claude: ["--top"] },
+      acpRegistryOverrides: { staging: "global cmd" },
+      tieredModels: {
+        enabled: true,
+        defaultTier: "complex",
+        classifier: { mode: "agent-self" },
+        tiers: {
+          complex: {
+            agent: "codex",
+            args: { codex: ["--tier-only"] },
+            acpRegistryOverrides: { staging: "tier cmd" },
+            local: true,
+          },
+        },
+      },
+    });
+    const resolved = resolveTier(config, "complex");
+    expect(resolved.tierName).toBe("complex");
+    expect(resolved.agent).toBe("codex");
+    expect(resolved.agentArgs).toEqual(["--tier-only"]);
+    expect(resolved.acpRegistryOverrides).toEqual({ staging: "tier cmd" });
+    expect(resolved.local).toBe(true);
+  });
+
   it("does not drop top-level --model when the tier does not set one", () => {
     const config = makeConfig({
       agent: "claude",

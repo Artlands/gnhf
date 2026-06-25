@@ -300,6 +300,11 @@ export function normalizeTieredModelsConfig(
         `Invalid tier name "${name}" in tieredModels.tiers: must match ${TIER_NAME_PATTERN.source}`,
       );
     }
+    if (name === "default") {
+      throw new InvalidConfigError(
+        `Invalid tier name "default" in tieredModels.tiers: "default" is reserved by gnhf as the legacy sentinel and cannot be used as a tier name`,
+      );
+    }
     tiers[name] = normalizeTier(raw, name);
   }
 

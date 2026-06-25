@@ -80,7 +80,7 @@ function dropModelClassFlags(topArgs: string[], agent: AgentName): string[] {
 
 export function resolveTier(config: Config, tierName: string): ResolvedTier {
   const tieredModels = config.tieredModels;
-  if (!isTieredModelsActive(tieredModels) || tierName === DEFAULT_TIER_NAME) {
+  if (!isTieredModelsActive(tieredModels)) {
     const native = getNativeAgentName(config.agent);
     return {
       tierName: DEFAULT_TIER_NAME,
