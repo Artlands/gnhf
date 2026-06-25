@@ -101,6 +101,19 @@ describe("normalizeTieredModelsConfig", () => {
     ).toThrow(/reserved by gnhf/);
   });
 
+  it("rejects 'classifier' as a tier name because it collides with classifier accounting", () => {
+    expect(() =>
+      normalizeTieredModelsConfig(
+        {
+          enabled: true,
+          defaultTier: "classifier",
+          tiers: { classifier: {} },
+        },
+        "claude",
+      ),
+    ).toThrow(/classifier.*reserved by gnhf/);
+  });
+
   it("rejects tier names that contain invalid characters", () => {
     expect(() =>
       normalizeTieredModelsConfig(

@@ -249,6 +249,68 @@ function buildResumeSchemaOptions(
   );
 }
 
+function validatePinnedTier(
+  pinTier: string | undefined,
+  runInfo: RunInfo,
+): void {
+  if (pinTier === undefined) return;
+  if (runInfo.tieredModels === undefined) {
+    console.error(`--tier requires tieredModels.enabled for the resolved run.`);
+    process.exit(1);
+  }
+  if (!(pinTier in runInfo.tieredModels.tiers)) {
+    const available = Object.keys(runInfo.tieredModels.tiers).join(", ");
+    console.error(`Unknown tier "${pinTier}". Configured tiers: ${available}.`);
+    process.exit(1);
+  }
+}
+
+function sumRecordValues(values: Record<string, number>): number {
+  return Object.values(values).reduce((sum, value) => sum + value, 0);
+}
+
+function countPositiveRecordValues(values: Record<string, number>): number {
+  return Object.values(values).filter((value) => value > 0).length;
+}
+
+function buildTierTelemetrySummary(
+  runInfo: RunInfo,
+  finalState: {
+    tierIterationCounts: Record<string, number>;
+    inputTokensByTier: Record<string, number>;
+    outputTokensByTier: Record<string, number>;
+    billableInputTokens: number;
+    billableOutputTokens: number;
+  },
+):
+  | {
+      tier_count: number;
+      local_tier_count: number;
+      active_tier_count: number;
+      tier_iterations_total: number;
+      tier_input_tokens_total: number;
+      tier_output_tokens_total: number;
+      billable_input_tokens: number;
+      billable_output_tokens: number;
+    }
+  | undefined {
+  if (runInfo.tieredModels === undefined) return undefined;
+  return {
+    tier_count: Object.keys(runInfo.tieredModels.tiers).length,
+    local_tier_count: Object.values(runInfo.tieredModels.tiers).filter(
+      (tier) => tier.local === true,
+    ).length,
+    active_tier_count: countPositiveRecordValues(
+      finalState.tierIterationCounts,
+    ),
+    tier_iterations_total: sumRecordValues(finalState.tierIterationCounts),
+    tier_input_tokens_total: sumRecordValues(finalState.inputTokensByTier),
+    tier_output_tokens_total: sumRecordValues(finalState.outputTokensByTier),
+    billable_input_tokens: finalState.billableInputTokens,
+    billable_output_tokens: finalState.billableOutputTokens,
+  };
+}
+
 function initializeNewBranch(
   prompt: string,
   cwd: string,
@@ -766,24 +828,6 @@ program
       const disableClassifier = options.classifier === false;
       const pinTier = options.tier;
 
-      if (pinTier !== undefined && config.tieredModels === undefined) {
-        console.error(
-          `--tier requires tieredModels.enabled in ~/.gnhf/config.yml.`,
-        );
-        process.exit(1);
-      }
-      if (
-        pinTier !== undefined &&
-        config.tieredModels !== undefined &&
-        !(pinTier in config.tieredModels.tiers)
-      ) {
-        const available = Object.keys(config.tieredModels.tiers).join(", ");
-        console.error(
-          `Unknown tier "${pinTier}". Configured tiers: ${available}.`,
-        );
-        process.exit(1);
-      }
-
       const schemaFlags: SchemaOptionFlags = {
         disableClassifier: disableClassifier || pinTier !== undefined,
       };
@@ -997,6 +1041,8 @@ program
 
         runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
       }
+
+      validatePinnedTier(pinTier, runInfo);
 
       let sleepPreventionCleanup: (() => Promise<void>) | null = null;
       if (config.preventSleep) {
@@ -1242,11 +1288,7 @@ program
         });
 
         const tieredModelsEnabled = runInfo.tieredModels !== undefined;
-        const localTiers = tieredModelsEnabled
-          ? Object.entries(runInfo.tieredModels!.tiers)
-              .filter(([, tier]) => tier.local === true)
-              .map(([name]) => name)
-          : [];
+        const tierTelemetry = buildTierTelemetrySummary(runInfo, finalState);
         telemetry.track("run", {
           agent: telemetryAgent,
           mode: runMode,
@@ -1270,10 +1312,7 @@ program
               : runInfo.tieredModels!.classifier.mode
             : undefined,
           tier_pinned: pinTier !== undefined,
-          tier_iteration_counts: finalState.tierIterationCounts,
-          tier_input_tokens: finalState.inputTokensByTier,
-          tier_output_tokens: finalState.outputTokensByTier,
-          local_tiers: localTiers,
+          tier_telemetry: tierTelemetry,
           billable_input_tokens: finalState.billableInputTokens,
           billable_output_tokens: finalState.billableOutputTokens,
         });

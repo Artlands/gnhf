@@ -1852,6 +1852,94 @@ describe("Orchestrator tier selection", () => {
     expect(state.outputTokensByTier["cheap"]).toBe(50);
   });
 
+  it("treats upfront classifier usage events as cumulative from the classifier baseline", async () => {
+    let classifierCalls = 0;
+    const complexAgent: Agent = {
+      name: "claude:complex",
+      run: vi.fn(async (_p, _c, opts) => {
+        classifierCalls += 1;
+        if (classifierCalls === 1) {
+          opts?.onUsage?.({
+            inputTokens: 10,
+            outputTokens: 2,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          });
+          opts?.onUsage?.({
+            inputTokens: 20,
+            outputTokens: 4,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          });
+          return {
+            output: {
+              success: true,
+              summary: "tier-selection",
+              key_changes_made: [],
+              key_learnings: [],
+              next_iteration_tier: "simple",
+            },
+            usage: {
+              inputTokens: 20,
+              outputTokens: 4,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          };
+        }
+        return createSuccessResult("done");
+      }),
+    };
+    const simpleAgent: Agent = {
+      name: "claude:simple",
+      run: vi.fn(async (_p, _c, opts) => {
+        opts?.onUsage?.({
+          inputTokens: 5,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        });
+        return {
+          output: {
+            success: true,
+            summary: "done",
+            key_changes_made: ["x"],
+            key_learnings: [],
+            next_iteration_tier: "complex",
+          },
+          usage: {
+            inputTokens: 5,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          },
+        };
+      }),
+    };
+    const provider = makeProvider({
+      complex: complexAgent,
+      simple: simpleAgent,
+      cheap: { name: "claude:cheap", run: vi.fn() },
+    });
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      tieredRunInfo(),
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    const state = orchestrator.getState();
+    expect(state.totalInputTokens).toBe(25);
+    expect(state.totalOutputTokens).toBe(5);
+    expect(state.inputTokensByTier.classifier).toBe(20);
+    expect(state.inputTokensByTier.simple).toBe(5);
+  });
+
   it("uses billable tokens (excluding local tiers) when checking --max-tokens", async () => {
     const tieredCfg = {
       ...tieredModels,

@@ -8,6 +8,7 @@ import {
   type AgentSpec,
 } from "./config.js";
 import {
+  CLASSIFIER_TIER_NAME,
   CLASSIFIER_MODES,
   TIER_NAME_PATTERN,
   type ClassifierMode,
@@ -327,6 +328,11 @@ export function normalizeTieredModelsConfig(
     if (name === "default") {
       throw new InvalidConfigError(
         `Invalid tier name "default" in tieredModels.tiers: "default" is reserved by gnhf as the legacy sentinel and cannot be used as a tier name`,
+      );
+    }
+    if (name === CLASSIFIER_TIER_NAME) {
+      throw new InvalidConfigError(
+        `Invalid tier name "${CLASSIFIER_TIER_NAME}" in tieredModels.tiers: "${CLASSIFIER_TIER_NAME}" is reserved by gnhf for classifier accounting and cannot be used as a tier name`,
       );
     }
     tiers[name] = normalizeTier(raw, name);

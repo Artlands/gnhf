@@ -12,6 +12,7 @@ import { redactAgentSpecForLogs, type Config } from "./config.js";
 import type { RunInfo, TierHistorySource } from "./run.js";
 import { appendNotes, appendTierHistory, toStringArray } from "./run.js";
 import {
+  CLASSIFIER_TIER_NAME,
   classifierUsesSelf,
   getTierNames,
   isLocalTier,
@@ -130,8 +131,6 @@ function wrapAgentAsProvider(agent: Agent): AgentProvider {
     close: agent.close ? agent.close.bind(agent) : () => undefined,
   };
 }
-
-const CLASSIFIER_TIER_NAME = "classifier";
 
 function tierEnabled(
   tieredModels: TieredModelsConfig | undefined,
@@ -1086,6 +1085,8 @@ ${this.pendingCommitFailure}
     });
 
     const classifierLocal = isLocalTier(tieredModels, classifierTier);
+    const baseInputTokens = this.state.totalInputTokens;
+    const baseOutputTokens = this.state.totalOutputTokens;
     const billableInputBaseline = this.state.billableInputTokens;
     const billableOutputBaseline = this.state.billableOutputTokens;
     const classifierInputBaseline =
@@ -1094,8 +1095,8 @@ ${this.pendingCommitFailure}
       this.state.outputTokensByTier[CLASSIFIER_TIER_NAME] ?? 0;
 
     const onUsage = (usage: TokenUsage) => {
-      this.state.totalInputTokens += usage.inputTokens;
-      this.state.totalOutputTokens += usage.outputTokens;
+      this.state.totalInputTokens = baseInputTokens + usage.inputTokens;
+      this.state.totalOutputTokens = baseOutputTokens + usage.outputTokens;
       this.state.inputTokensByTier[CLASSIFIER_TIER_NAME] =
         classifierInputBaseline + usage.inputTokens;
       this.state.outputTokensByTier[CLASSIFIER_TIER_NAME] =

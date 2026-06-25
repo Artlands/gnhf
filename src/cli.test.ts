@@ -109,6 +109,7 @@ interface CliMockOverrides {
   listWorktreePaths?: ReturnType<typeof vi.fn>;
   worktreeExists?: ReturnType<typeof vi.fn>;
   getBranchDiffStats?: ReturnType<typeof vi.fn>;
+  setupRun?: ReturnType<typeof vi.fn>;
   peekRunMetadata?: ReturnType<typeof vi.fn>;
   resumeRun?: ReturnType<typeof vi.fn>;
   getLastIterationNumber?: ReturnType<typeof vi.fn>;
@@ -162,7 +163,7 @@ async function runCliWithMocks(
   };
   let consoleErrorCalls: unknown[][] = [];
   let stdoutWriteCalls: unknown[][] = [];
-  const setupRun = vi.fn(() => stubRunInfo);
+  const setupRun = overrides.setupRun ?? vi.fn(() => stubRunInfo);
   const peekRunMetadata = overrides.peekRunMetadata ?? vi.fn(() => stubRunInfo);
   const resumeRun = overrides.resumeRun ?? vi.fn();
   const getLastIterationNumber =
@@ -193,6 +194,12 @@ async function runCliWithMocks(
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     }));
 
   const rendererStart = vi.fn();
@@ -753,6 +760,89 @@ describe("cli", () => {
       "run",
       expect.objectContaining({ agent: "acp:custom" }),
     );
+  });
+
+  it("sends aggregate tier telemetry without raw user-defined tier names", async () => {
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "company-internal-fast",
+      classifier: { mode: "agent-self" as const },
+      tiers: {
+        "company-internal-fast": { args: { claude: ["--model", "opus"] } },
+        "alice-test-local": {
+          agent: "acp:local-qwen" as const,
+          local: true,
+        },
+      },
+    };
+    const tieredRunInfo: RunInfo = {
+      ...stubRunInfo,
+      tieredModels,
+    };
+    const { telemetry } = await runCliWithMocks(
+      ["ship it"],
+      {
+        agent: "claude",
+        agentPathOverride: {},
+        agentArgsOverride: {},
+        acpRegistryOverrides: {},
+        maxConsecutiveFailures: 3,
+        preventSleep: false,
+        tieredModels,
+      },
+      {
+        setupRun: vi.fn(() => tieredRunInfo),
+        orchestratorGetState: vi.fn(() => ({
+          status: "completed" as const,
+          gracefulStopRequested: false,
+          currentIteration: 2,
+          totalInputTokens: 300,
+          totalOutputTokens: 40,
+          commitCount: 1,
+          iterations: [],
+          successCount: 1,
+          failCount: 0,
+          consecutiveFailures: 0,
+          startTime: new Date("2026-01-01T00:00:00Z"),
+          waitingUntil: null,
+          lastMessage: null,
+          currentTier: "company-internal-fast",
+          inputTokensByTier: {
+            "company-internal-fast": 200,
+            "alice-test-local": 100,
+          },
+          outputTokensByTier: {
+            "company-internal-fast": 30,
+            "alice-test-local": 10,
+          },
+          billableInputTokens: 200,
+          billableOutputTokens: 30,
+          tierIterationCounts: {
+            "company-internal-fast": 1,
+            "alice-test-local": 1,
+          },
+        })),
+      },
+    );
+
+    const payload = telemetry.track.mock.calls[0]?.[1];
+    expect(payload).toEqual(
+      expect.objectContaining({
+        tier_telemetry: {
+          tier_count: 2,
+          local_tier_count: 1,
+          active_tier_count: 2,
+          tier_iterations_total: 2,
+          tier_input_tokens_total: 300,
+          tier_output_tokens_total: 40,
+          billable_input_tokens: 200,
+          billable_output_tokens: 30,
+        },
+      }),
+    );
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("company-internal-fast");
+    expect(serialized).not.toContain("alice-test-local");
   });
 
   it("prints a permanent exit summary after the run completes", async () => {
