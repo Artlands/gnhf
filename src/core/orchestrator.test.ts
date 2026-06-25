@@ -83,6 +83,7 @@ const runInfo: RunInfo = {
   commitMessage: undefined,
   tierConfigPath: "/repo/.gnhf/runs/run-abc/tier-config.json",
   tieredModels: undefined,
+  tierHistoryPath: "/repo/.gnhf/runs/run-abc/tier-history.jsonl",
 };
 
 function createSuccessResult(summary = "done"): AgentResult {
@@ -1538,5 +1539,374 @@ describe("Orchestrator crash resilience", () => {
     expect(iterationEnd).toHaveBeenCalledTimes(1);
     expect(abort).toHaveBeenCalledWith("push failed: remote rejected push");
     expect(orchestrator.getState().status).toBe("aborted");
+  });
+});
+
+describe("Orchestrator tier selection", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  const tieredModels = {
+    enabled: true as const,
+    defaultTier: "complex",
+    classifier: { mode: "agent-self" as const },
+    tiers: {
+      complex: { agent: "claude" as const, description: "planning" },
+      simple: { agent: "claude" as const, description: "mechanical" },
+      cheap: { agent: "claude" as const, local: true, description: "tiny" },
+    },
+  };
+
+  function tieredRunInfo(): RunInfo {
+    return { ...runInfo, tieredModels };
+  }
+
+  function makeProvider(agentByTier: Record<string, Agent>): {
+    defaultTier: string;
+    tiers: readonly string[];
+    tieredModels: typeof tieredModels;
+    getAgentFor: (tier: string) => Agent;
+    close: () => Promise<void>;
+  } {
+    return {
+      defaultTier: tieredModels.defaultTier,
+      tiers: Object.keys(agentByTier),
+      tieredModels,
+      getAgentFor: (tier: string) => {
+        const agent = agentByTier[tier];
+        if (!agent) throw new Error(`unknown tier ${tier}`);
+        return agent;
+      },
+      close: async () => undefined,
+    };
+  }
+
+  it("routes each iteration to the tier picked by the previous output (classifier seeds iteration 1)", async () => {
+    const usedTiers: string[] = [];
+    const makeAgent = (tier: string, nextTier: string): Agent => ({
+      name: `claude:${tier}`,
+      run: vi.fn(async () => {
+        usedTiers.push(tier);
+        return {
+          output: {
+            success: true,
+            summary: `iter on ${tier}`,
+            key_changes_made: ["x"],
+            key_learnings: [],
+            next_iteration_tier: nextTier,
+          },
+          usage: {
+            inputTokens: 5,
+            outputTokens: 3,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          },
+        };
+      }),
+    });
+    const provider = makeProvider({
+      complex: makeAgent("complex", "simple"),
+      simple: makeAgent("simple", "complex"),
+      cheap: makeAgent("cheap", "complex"),
+    });
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      tieredRunInfo(),
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 2 },
+    );
+
+    await orchestrator.start();
+
+    // 1st call = upfront classifier (defaultTier "complex" → picks "simple")
+    // 2nd call = iteration 1 on "simple" → picks "complex"
+    // 3rd call = iteration 2 on "complex"
+    expect(usedTiers).toEqual(["complex", "simple", "complex"]);
+    expect(orchestrator.getState().tierIterationCounts).toEqual({
+      simple: 1,
+      complex: 1,
+    });
+  });
+
+  it("falls back to defaultTier when the agent reports an unknown tier", async () => {
+    const usedTiers: string[] = [];
+    const provider = makeProvider({
+      complex: {
+        name: "claude:complex",
+        run: vi.fn(async () => {
+          usedTiers.push("complex");
+          return {
+            output: {
+              success: true,
+              summary: "done",
+              key_changes_made: ["x"],
+              key_learnings: [],
+              next_iteration_tier: "bogus",
+            },
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          };
+        }),
+      },
+      simple: { name: "claude:simple", run: vi.fn() },
+      cheap: { name: "claude:cheap", run: vi.fn() },
+    });
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      tieredRunInfo(),
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 2 },
+    );
+
+    await orchestrator.start();
+
+    // Classifier (defaultTier=complex) returns bogus → fall back to complex.
+    // Iteration 1 (complex) also reports bogus → fall back to complex again.
+    expect(usedTiers).toEqual(["complex", "complex", "complex"]);
+  });
+
+  it("forces defaultTier after an agent-reported failure (success=false)", async () => {
+    const usedTiers: string[] = [];
+    const provider = makeProvider({
+      complex: {
+        name: "claude:complex",
+        run: vi.fn(async () => {
+          usedTiers.push("complex");
+          return {
+            output: {
+              success: true,
+              summary: "done",
+              key_changes_made: ["x"],
+              key_learnings: [],
+              next_iteration_tier: "simple",
+            },
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          };
+        }),
+      },
+      simple: {
+        name: "claude:simple",
+        run: vi.fn(async () => {
+          usedTiers.push("simple");
+          return {
+            output: {
+              success: false,
+              summary: "could not make progress",
+              key_changes_made: [],
+              key_learnings: [],
+              next_iteration_tier: "cheap",
+            },
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          };
+        }),
+      },
+      cheap: {
+        name: "claude:cheap",
+        run: vi.fn(async () => {
+          usedTiers.push("cheap");
+          throw new Error("should not be invoked");
+        }),
+      },
+    });
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      tieredRunInfo(),
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 2 },
+    );
+
+    await orchestrator.start();
+
+    // 1: classifier on complex → next=simple
+    // 2: iteration 1 on simple → fails, requests "cheap" but failure override
+    //    forces defaultTier (complex) for iteration 2.
+    // 3: iteration 2 on complex.
+    // "cheap" must never be invoked despite simple's request.
+    expect(usedTiers).toEqual(["complex", "simple", "complex"]);
+  });
+
+  it("pins every iteration to --tier even when the agent reports a different tier", async () => {
+    const usedTiers: string[] = [];
+    const makeAgent = (tier: string): Agent => ({
+      name: `claude:${tier}`,
+      run: vi.fn(async () => {
+        usedTiers.push(tier);
+        return {
+          output: {
+            success: true,
+            summary: "done",
+            key_changes_made: ["x"],
+            key_learnings: [],
+            next_iteration_tier: "complex",
+          },
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          },
+        };
+      }),
+    });
+    const provider = makeProvider({
+      complex: makeAgent("complex"),
+      simple: makeAgent("simple"),
+      cheap: makeAgent("cheap"),
+    });
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      tieredRunInfo(),
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 2, pinTier: "simple" },
+    );
+
+    await orchestrator.start();
+
+    expect(usedTiers).toEqual(["simple", "simple"]);
+  });
+
+  it("excludes local-tier tokens from the billable budget while still counting toward total", async () => {
+    const tieredCfg = {
+      ...tieredModels,
+      defaultTier: "cheap",
+    };
+    const cheapAgent: Agent = {
+      name: "claude:cheap",
+      run: vi.fn(async (_p, _c, opts) => {
+        opts?.onUsage?.({
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        });
+        return {
+          output: {
+            success: true,
+            summary: "done",
+            key_changes_made: ["x"],
+            key_learnings: [],
+            next_iteration_tier: "cheap",
+          },
+          usage: {
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          },
+        };
+      }),
+    };
+    const provider = {
+      defaultTier: "cheap",
+      tiers: ["complex", "simple", "cheap"],
+      tieredModels: tieredCfg,
+      getAgentFor: () => cheapAgent,
+      close: async () => undefined,
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      { ...runInfo, tieredModels: tieredCfg },
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1, disableClassifier: true },
+    );
+
+    await orchestrator.start();
+
+    const state = orchestrator.getState();
+    expect(state.totalInputTokens).toBe(100);
+    expect(state.totalOutputTokens).toBe(50);
+    expect(state.billableInputTokens).toBe(0);
+    expect(state.billableOutputTokens).toBe(0);
+    expect(state.inputTokensByTier["cheap"]).toBe(100);
+    expect(state.outputTokensByTier["cheap"]).toBe(50);
+  });
+
+  it("uses billable tokens (excluding local tiers) when checking --max-tokens", async () => {
+    const tieredCfg = {
+      ...tieredModels,
+      defaultTier: "cheap",
+    };
+    const cheapAgent: Agent = {
+      name: "claude:cheap",
+      run: vi.fn(async (_p, _c, opts) => {
+        opts?.onUsage?.({
+          inputTokens: 1_000,
+          outputTokens: 500,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        });
+        return {
+          output: {
+            success: true,
+            summary: "done",
+            key_changes_made: ["x"],
+            key_learnings: [],
+            next_iteration_tier: "cheap",
+          },
+          usage: {
+            inputTokens: 1_000,
+            outputTokens: 500,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          },
+        };
+      }),
+    };
+    const provider = {
+      defaultTier: "cheap",
+      tiers: ["complex", "simple", "cheap"],
+      tieredModels: tieredCfg,
+      getAgentFor: () => cheapAgent,
+      close: async () => undefined,
+    };
+    const abort = vi.fn();
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      { ...runInfo, tieredModels: tieredCfg },
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 3, maxTokens: 10, disableClassifier: true },
+    );
+    orchestrator.on("abort", abort);
+
+    await orchestrator.start();
+
+    // Local tier accumulates totals but stays under the billable cap forever.
+    // We hit maxIterations, not maxTokens.
+    expect(abort).toHaveBeenCalledWith("max iterations reached (3)");
+    expect(orchestrator.getState().billableInputTokens).toBe(0);
   });
 });

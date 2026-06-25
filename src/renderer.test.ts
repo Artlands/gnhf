@@ -287,6 +287,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const lines = renderer
@@ -320,6 +326,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const frame = buildFrame(
@@ -364,6 +376,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const frame = buildFrame(
@@ -404,6 +422,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const frame = buildFrame(
@@ -453,6 +477,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: longMessage,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const cells = buildFrameCells(
@@ -494,6 +524,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const frame = buildFrame(
@@ -532,6 +568,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: "reading files",
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const availableHeight = 22;
@@ -582,6 +624,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
     const meteors = [
       {
@@ -635,6 +683,12 @@ describe("buildFrame", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
     const bottomMeteors = [
       {
@@ -691,6 +745,12 @@ describe("buildContentCells adaptive height", () => {
     startTime: new Date("2026-01-01T00:00:00Z"),
     waitingUntil: null,
     lastMessage: "reading files",
+    currentTier: "default",
+    inputTokensByTier: {},
+    outputTokensByTier: {},
+    billableInputTokens: 0,
+    billableOutputTokens: 0,
+    tierIterationCounts: {},
   };
 
   const toText = (rows: ReturnType<typeof buildContentCells>): string =>
@@ -963,6 +1023,12 @@ describe("Renderer ctrl+c", () => {
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
 
     const { onInterrupt, orchestratorStop, pause } =
@@ -998,6 +1064,12 @@ describe("Renderer meteors", () => {
       startTime: new Date(0),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     };
     const orchestrator = Object.assign(new EventEmitter(), {
       getState: vi.fn(() => state),
@@ -1163,6 +1235,12 @@ describe("Renderer terminal title", () => {
     startTime: new Date("2026-01-01T00:00:00Z"),
     waitingUntil: null,
     lastMessage: "reading files",
+    currentTier: "default",
+    inputTokensByTier: {},
+    outputTokensByTier: {},
+    billableInputTokens: 0,
+    billableOutputTokens: 0,
+    tierIterationCounts: {},
   };
 
   it("writes a running title with the active moon and counters", () => {

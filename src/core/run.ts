@@ -40,6 +40,7 @@ export interface RunInfo {
   commitMessage: CommitMessageConfig | undefined;
   tierConfigPath: string;
   tieredModels: TieredModelsConfig | undefined;
+  tierHistoryPath: string;
 }
 
 export interface RunMetadata {
@@ -55,6 +56,7 @@ const LOG_FILENAME = "gnhf.log";
 const STOP_WHEN_FILENAME = "stop-when";
 const COMMIT_MESSAGE_FILENAME = "commit-message";
 const TIER_CONFIG_FILENAME = "tier-config.json";
+const TIER_HISTORY_FILENAME = "tier-history.jsonl";
 
 function writeSchemaFile(
   schemaPath: string,
@@ -318,6 +320,7 @@ export function setupRun(
     commitMessage,
     tierConfigPath,
     tieredModels,
+    tierHistoryPath: join(runDir, TIER_HISTORY_FILENAME),
   };
 }
 
@@ -380,6 +383,7 @@ export function resumeRun(
     commitMessage,
     tierConfigPath,
     tieredModels,
+    tierHistoryPath: join(runDir, TIER_HISTORY_FILENAME),
   };
 }
 
@@ -448,6 +452,29 @@ export function toStringArray(value: unknown): string[] {
 function formatListSection(title: string, items: string[]): string {
   if (items.length === 0) return "";
   return `**${title}:**\n${items.map((item) => `- ${item}`).join("\n")}\n`;
+}
+
+export type TierHistorySource =
+  | "default"
+  | "self"
+  | "classifier"
+  | "override"
+  | "failure-fallback"
+  | "commit-repair"
+  | "agent-error";
+
+export interface TierHistoryEntry {
+  iteration: number;
+  tier: string;
+  source: TierHistorySource;
+}
+
+export function appendTierHistory(
+  tierHistoryPath: string,
+  entry: TierHistoryEntry,
+): void {
+  const line = `${JSON.stringify({ ...entry, ts: new Date().toISOString() })}\n`;
+  appendFileSync(tierHistoryPath, line, "utf-8");
 }
 
 export function appendNotes(

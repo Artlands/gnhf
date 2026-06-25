@@ -286,6 +286,7 @@ describe("setupRun", () => {
       commitMessage: undefined,
       tierConfigPath: join(runDir, "tier-config.json"),
       tieredModels: undefined,
+      tierHistoryPath: join(runDir, "tier-history.jsonl"),
     });
   });
 });

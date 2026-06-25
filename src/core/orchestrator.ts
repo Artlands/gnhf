@@ -7,9 +7,16 @@ import {
   type TokenUsage,
 } from "./agents/types.js";
 import type { AgentProvider } from "./agents/factory.js";
+import { runUpfrontClassifier } from "./agents/classifier.js";
 import { redactAgentSpecForLogs, type Config } from "./config.js";
-import type { RunInfo } from "./run.js";
-import { appendNotes, toStringArray } from "./run.js";
+import type { RunInfo, TierHistorySource } from "./run.js";
+import { appendNotes, appendTierHistory, toStringArray } from "./run.js";
+import {
+  classifierUsesSelf,
+  getTierNames,
+  isLocalTier,
+  type TieredModelsConfig,
+} from "./tiered-models.js";
 import { appendDebugLog, serializeError } from "./debug-log.js";
 import {
   CommitFailedError,
@@ -62,6 +69,12 @@ export interface OrchestratorState {
   lastMessage: string | null;
   lastAgentError?: string | null;
   hasPendingCommitFailure?: boolean;
+  currentTier: string;
+  inputTokensByTier: Record<string, number>;
+  outputTokensByTier: Record<string, number>;
+  billableInputTokens: number;
+  billableOutputTokens: number;
+  tierIterationCounts: Record<string, number>;
 }
 
 export interface OrchestratorEvents {
@@ -77,6 +90,12 @@ export interface RunLimits {
   maxTokens?: number;
   stopWhen?: string;
   push?: boolean;
+  // CLI --tier <name>: pin every iteration to this tier and skip the
+  // upfront classifier. Validated against the configured tier set before
+  // construction.
+  pinTier?: string;
+  // CLI --no-classifier: force classifier mode off for this invocation.
+  disableClassifier?: boolean;
 }
 
 const STOP_CLOSE_AGENT_GRACE_MS = 250;
@@ -112,6 +131,14 @@ function wrapAgentAsProvider(agent: Agent): AgentProvider {
   };
 }
 
+const CLASSIFIER_TIER_NAME = "classifier";
+
+function tierEnabled(
+  tieredModels: TieredModelsConfig | undefined,
+): tieredModels is TieredModelsConfig {
+  return tieredModels !== undefined && tieredModels.enabled === true;
+}
+
 export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private config: Config;
   private provider: AgentProvider;
@@ -128,6 +155,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private activeIterationTokensEstimated = false;
   private loopDone = false;
   private stoppedEventEmitted = false;
+  private nextTier: string;
+  private nextTierSource: TierHistorySource;
+  private classifierAttempted = false;
 
   private state: Omit<
     OrchestratorState,
@@ -149,6 +179,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     waitingUntil: null,
     lastMessage: null,
     lastAgentError: null,
+    currentTier: "default",
+    inputTokensByTier: {},
+    outputTokensByTier: {},
+    billableInputTokens: 0,
+    billableOutputTokens: 0,
+    tierIterationCounts: {},
   };
 
   constructor(
@@ -174,10 +210,23 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.runInfo.baseCommit,
       this.cwd,
     );
+
+    const defaultTier = this.provider.defaultTier;
+    this.state.currentTier = defaultTier;
+
+    if (this.limits.pinTier !== undefined) {
+      this.nextTier = this.limits.pinTier;
+      this.nextTierSource = "override";
+      // Skip the upfront classifier — pinTier covers iteration 1 already.
+      this.classifierAttempted = true;
+    } else {
+      this.nextTier = defaultTier;
+      this.nextTierSource = "default";
+    }
   }
 
   private getActiveAgent(): Agent {
-    return this.provider.getAgentFor(this.provider.defaultTier);
+    return this.provider.getAgentFor(this.state.currentTier);
   }
 
   getState(): OrchestratorState {
@@ -286,9 +335,18 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       maxConsecutiveFailures: this.config.maxConsecutiveFailures,
       baseCommit: this.runInfo.baseCommit,
       initialCommitCount: this.state.commitCount,
+      tieredModelsEnabled: this.tieredModelsActive(),
+      classifierMode: this.runInfo.tieredModels?.classifier.mode,
+      pinTier: this.limits.pinTier,
+      disableClassifier: this.limits.disableClassifier === true,
+      defaultTier: this.provider.defaultTier,
     });
 
     try {
+      if (this.shouldRunUpfrontClassifier()) {
+        await this.runUpfrontClassifierIfNeeded();
+      }
+
       while (!this.stopRequested) {
         const preIterationAbortReason = this.getPreIterationAbortReason();
         if (preIterationAbortReason) {
@@ -300,16 +358,19 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         }
 
         this.state.currentIteration++;
+        this.applyNextTierForIteration();
         this.state.status = "running";
         this.emit("iteration:start", this.state.currentIteration);
         this.emit("state", this.getState());
 
+        const tierSelection = this.buildTierSelectionInfo();
         const baseIterationPrompt = buildIterationPrompt({
           n: this.state.currentIteration,
           runId: this.runInfo.runId,
           prompt: this.prompt,
           stopWhen: this.limits.stopWhen,
           commitMessage: this.config.commitMessage,
+          ...(tierSelection === undefined ? {} : { tierSelection }),
         });
         const iterationPrompt = this.pendingCommitFailure
           ? this.buildCommitRepairPrompt(baseIterationPrompt)
@@ -457,6 +518,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private async runIteration(prompt: string): Promise<RunIterationResult> {
     const baseInputTokens = this.state.totalInputTokens;
     const baseOutputTokens = this.state.totalOutputTokens;
+    const tierForIteration = this.state.currentTier;
+    const tierInputBaseline =
+      this.state.inputTokensByTier[tierForIteration] ?? 0;
+    const tierOutputBaseline =
+      this.state.outputTokensByTier[tierForIteration] ?? 0;
+    const billableInputBaseline = this.state.billableInputTokens;
+    const billableOutputBaseline = this.state.billableOutputTokens;
+    const isLocal = isLocalTier(this.runInfo.tieredModels, tierForIteration);
 
     this.activeAbortController = new AbortController();
     this.pendingAbortReason = null;
@@ -465,6 +534,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     const onUsage = (usage: TokenUsage) => {
       this.state.totalInputTokens = baseInputTokens + usage.inputTokens;
       this.state.totalOutputTokens = baseOutputTokens + usage.outputTokens;
+      this.state.inputTokensByTier[tierForIteration] =
+        tierInputBaseline + usage.inputTokens;
+      this.state.outputTokensByTier[tierForIteration] =
+        tierOutputBaseline + usage.outputTokens;
+      if (!isLocal) {
+        this.state.billableInputTokens =
+          billableInputBaseline + usage.inputTokens;
+        this.state.billableOutputTokens =
+          billableOutputBaseline + usage.outputTokens;
+      }
       this.activeIterationTokensEstimated = usage.estimated === true;
       this.emit("state", this.getState());
 
@@ -527,6 +606,14 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       if (result.output.success) {
         const record = this.recordSuccess(result.output);
+        if (record.success) {
+          this.adoptNextTierFromOutput(result.output);
+        } else {
+          // recordSuccess returns success=false only on commit failure;
+          // restart the next iteration on the safe default tier so the
+          // repair pass has full capability.
+          this.setNextTier(this.provider.defaultTier, "commit-repair");
+        }
         const abortReason =
           record.success && this.limits.push === true
             ? this.pushAfterSuccess()
@@ -538,6 +625,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           ...(abortReason === undefined ? {} : { abortReason }),
         };
       }
+      this.setNextTier(this.provider.defaultTier, "failure-fallback");
       return {
         type: "completed",
         record: this.recordFailure(
@@ -598,6 +686,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       const summary = err instanceof Error ? err.message : String(err);
+      this.setNextTier(this.provider.defaultTier, "agent-error");
       return {
         type: "completed",
         record: this.recordFailure(`[ERROR] ${summary}`, summary, [], "error"),
@@ -790,10 +879,16 @@ ${this.pendingCommitFailure}
   private getTokenAbortReason(): string | null {
     if (this.limits.maxTokens === undefined) return null;
 
+    if (this.tieredModelsActive()) {
+      const billable =
+        this.state.billableInputTokens + this.state.billableOutputTokens;
+      if (billable < this.limits.maxTokens) return null;
+      return `max tokens reached (${billable}/${this.limits.maxTokens} billable)`;
+    }
+
     const totalTokens =
       this.state.totalInputTokens + this.state.totalOutputTokens;
     if (totalTokens < this.limits.maxTokens) return null;
-
     return `max tokens reached (${totalTokens}/${this.limits.maxTokens})`;
   }
 
@@ -851,6 +946,219 @@ ${this.pendingCommitFailure}
     }
     this.stoppedEventEmitted = true;
     this.emit("stopped");
+  }
+
+  private tieredModelsActive(): boolean {
+    return tierEnabled(this.runInfo.tieredModels);
+  }
+
+  private classifierActive(): boolean {
+    if (!this.tieredModelsActive()) return false;
+    if (this.limits.disableClassifier === true) return false;
+    if (this.limits.pinTier !== undefined) return false;
+    return classifierUsesSelf(this.runInfo.tieredModels!.classifier.mode);
+  }
+
+  private buildTierSelectionInfo():
+    | {
+        fieldName: string;
+        defaultTier: string;
+        tiers: { name: string; description?: string }[];
+      }
+    | undefined {
+    if (!this.classifierActive()) return undefined;
+    const tieredModels = this.runInfo.tieredModels!;
+    return {
+      fieldName: "next_iteration_tier",
+      defaultTier: tieredModels.defaultTier,
+      tiers: getTierNames(tieredModels).map((name) => {
+        const tier = tieredModels.tiers[name];
+        return tier?.description === undefined
+          ? { name }
+          : { name, description: tier.description };
+      }),
+    };
+  }
+
+  private setNextTier(tier: string, source: TierHistorySource): void {
+    this.nextTier = this.validateTierName(tier)
+      ? tier
+      : this.provider.defaultTier;
+    this.nextTierSource = this.validateTierName(tier)
+      ? source
+      : "failure-fallback";
+    if (!this.validateTierName(tier)) {
+      appendDebugLog("tier:invalid-next", {
+        iteration: this.state.currentIteration,
+        requested: tier,
+        fallback: this.provider.defaultTier,
+      });
+    }
+  }
+
+  private validateTierName(tier: string): boolean {
+    if (!this.tieredModelsActive()) return tier === this.provider.defaultTier;
+    return tier in this.runInfo.tieredModels!.tiers;
+  }
+
+  private adoptNextTierFromOutput(output: AgentOutput): void {
+    if (!this.classifierActive()) {
+      this.setNextTier(this.provider.defaultTier, "default");
+      return;
+    }
+    const requested = (output as unknown as Record<string, unknown>)
+      .next_iteration_tier;
+    if (typeof requested !== "string" || requested.trim() === "") {
+      appendDebugLog("tier:missing-next", {
+        iteration: this.state.currentIteration,
+        fallback: this.provider.defaultTier,
+      });
+      this.setNextTier(this.provider.defaultTier, "failure-fallback");
+      return;
+    }
+    this.setNextTier(requested, "self");
+  }
+
+  private applyNextTierForIteration(): void {
+    if (this.limits.pinTier !== undefined) {
+      this.state.currentTier = this.limits.pinTier;
+      this.recordTierHistory("override");
+      return;
+    }
+    this.state.currentTier = this.nextTier;
+    this.recordTierHistory(this.nextTierSource);
+    // Reset for the next iteration; the iteration outcome overwrites this.
+    this.nextTier = this.provider.defaultTier;
+    this.nextTierSource = "default";
+  }
+
+  private recordTierHistory(source: TierHistorySource): void {
+    const tier = this.state.currentTier;
+    this.state.tierIterationCounts[tier] =
+      (this.state.tierIterationCounts[tier] ?? 0) + 1;
+    if (!this.tieredModelsActive()) return;
+    try {
+      appendTierHistory(this.runInfo.tierHistoryPath, {
+        iteration: this.state.currentIteration,
+        tier,
+        source,
+      });
+    } catch (err) {
+      appendDebugLog("tier:history-write-error", {
+        iteration: this.state.currentIteration,
+        error: serializeError(err),
+      });
+    }
+  }
+
+  private shouldRunUpfrontClassifier(): boolean {
+    if (this.classifierAttempted) return false;
+    if (!this.classifierActive()) return false;
+    if (this.state.currentIteration > 0) return false;
+    return true;
+  }
+
+  private async runUpfrontClassifierIfNeeded(): Promise<void> {
+    if (this.classifierAttempted) return;
+    this.classifierAttempted = true;
+
+    if (!this.classifierActive()) return;
+    if (this.state.currentIteration > 0) return;
+
+    const tieredModels = this.runInfo.tieredModels!;
+    const classifierTier =
+      tieredModels.classifier.routerTier ?? tieredModels.defaultTier;
+    if (!(classifierTier in tieredModels.tiers)) {
+      appendDebugLog("classifier:fallback", {
+        reason: "router-tier-missing",
+        requested: classifierTier,
+        fallback: tieredModels.defaultTier,
+      });
+      this.setNextTier(tieredModels.defaultTier, "default");
+      return;
+    }
+
+    const tiers = getTierNames(tieredModels).map((name) => {
+      const tier = tieredModels.tiers[name];
+      return tier?.description === undefined
+        ? { name }
+        : { name, description: tier.description };
+    });
+
+    const classifierLocal = isLocalTier(tieredModels, classifierTier);
+    const billableInputBaseline = this.state.billableInputTokens;
+    const billableOutputBaseline = this.state.billableOutputTokens;
+    const classifierInputBaseline =
+      this.state.inputTokensByTier[CLASSIFIER_TIER_NAME] ?? 0;
+    const classifierOutputBaseline =
+      this.state.outputTokensByTier[CLASSIFIER_TIER_NAME] ?? 0;
+
+    const onUsage = (usage: TokenUsage) => {
+      this.state.totalInputTokens += usage.inputTokens;
+      this.state.totalOutputTokens += usage.outputTokens;
+      this.state.inputTokensByTier[CLASSIFIER_TIER_NAME] =
+        classifierInputBaseline + usage.inputTokens;
+      this.state.outputTokensByTier[CLASSIFIER_TIER_NAME] =
+        classifierOutputBaseline + usage.outputTokens;
+      if (!classifierLocal) {
+        this.state.billableInputTokens =
+          billableInputBaseline + usage.inputTokens;
+        this.state.billableOutputTokens =
+          billableOutputBaseline + usage.outputTokens;
+      }
+      if (usage.estimated) this.state.tokensEstimated = true;
+      this.emit("state", this.getState());
+    };
+
+    const controller = new AbortController();
+    const previousController = this.activeAbortController;
+    this.activeAbortController = controller;
+
+    appendDebugLog("classifier:start", {
+      tier: classifierTier,
+      local: classifierLocal,
+    });
+    const startedAt = Date.now();
+    try {
+      const agent = this.provider.getAgentFor(classifierTier);
+      const classifierLogPath = join(this.runInfo.runDir, "classifier.jsonl");
+      const result = await runUpfrontClassifier({
+        agent,
+        objective: this.prompt,
+        cwd: this.cwd,
+        defaultTier: tieredModels.defaultTier,
+        tiers,
+        fieldName: "next_iteration_tier",
+        signal: controller.signal,
+        onUsage,
+        logPath: classifierLogPath,
+      });
+      if (this.validateTierName(result.tier)) {
+        this.nextTier = result.tier;
+        this.nextTierSource = "classifier";
+        appendDebugLog("classifier:end", {
+          elapsedMs: Date.now() - startedAt,
+          tier: result.tier,
+        });
+      } else {
+        appendDebugLog("classifier:fallback", {
+          reason: "tier-not-configured",
+          requested: result.tier,
+          fallback: tieredModels.defaultTier,
+          elapsedMs: Date.now() - startedAt,
+        });
+        this.setNextTier(tieredModels.defaultTier, "default");
+      }
+    } catch (err) {
+      appendDebugLog("classifier:fallback", {
+        reason: "classifier-error",
+        error: serializeError(err),
+        elapsedMs: Date.now() - startedAt,
+      });
+      this.setNextTier(tieredModels.defaultTier, "default");
+    } finally {
+      this.activeAbortController = previousController;
+    }
   }
 
   private snapshotGitState(): Record<string, unknown> {

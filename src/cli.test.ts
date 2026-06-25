@@ -92,6 +92,7 @@ const stubRunInfo: RunInfo = {
   commitMessage: undefined,
   tierConfigPath: "/repo/.gnhf/runs/run-abc/tier-config.json",
   tieredModels: undefined,
+  tierHistoryPath: "/repo/.gnhf/runs/run-abc/tier-history.jsonl",
 };
 
 interface CliMockOverrides {

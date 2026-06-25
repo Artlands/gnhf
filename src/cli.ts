@@ -56,7 +56,12 @@ import {
   getCommitMessageSchemaFields,
   type CommitMessageConfig,
 } from "./core/commit-message.js";
-import type { TieredModelsConfig } from "./core/tiered-models.js";
+import {
+  classifierUsesSelf,
+  getTierNames,
+  type TieredModelsConfig,
+} from "./core/tiered-models.js";
+import type { AgentOutputTierField } from "./core/agents/types.js";
 import { Orchestrator } from "./core/orchestrator.js";
 import { renderExitSummary } from "./core/exit-summary.js";
 import { MockOrchestrator } from "./mock-orchestrator.js";
@@ -178,13 +183,32 @@ function redactDebugArgs(args: string[]): string[] {
   return redacted;
 }
 
+interface SchemaOptionFlags {
+  disableClassifier?: boolean;
+}
+
+function buildTierField(
+  tieredModels: TieredModelsConfig | undefined,
+  flags: SchemaOptionFlags,
+): AgentOutputTierField | undefined {
+  if (tieredModels === undefined) return undefined;
+  if (flags.disableClassifier) return undefined;
+  if (!classifierUsesSelf(tieredModels.classifier.mode)) return undefined;
+  return {
+    name: "next_iteration_tier",
+    allowed: getTierNames(tieredModels),
+  };
+}
+
 function buildSchemaOptions(
   stopWhen: string | undefined,
   commitMessage: CommitMessageConfig | undefined,
   topLevelAgent: AgentSpec,
   tieredModels?: TieredModelsConfig,
+  flags: SchemaOptionFlags = {},
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
+  const tierField = buildTierField(tieredModels, flags);
   return {
     includeStopField: stopWhen !== undefined,
     ...(stopWhen === undefined ? {} : { stopWhen }),
@@ -192,6 +216,7 @@ function buildSchemaOptions(
     ...(commitFields.length === 0 ? {} : { commitFields }),
     topLevelAgent,
     ...(tieredModels === undefined ? {} : { tieredModels }),
+    ...(tierField === undefined ? {} : { tierField }),
   };
 }
 
@@ -200,8 +225,10 @@ function buildResumeSchemaOptions(
   commitMessage: CommitMessageConfig | undefined,
   topLevelAgent: AgentSpec,
   tieredModels?: TieredModelsConfig,
+  flags: SchemaOptionFlags = {},
 ): RunSchemaOptions {
   const commitFields = getCommitMessageSchemaFields(commitMessage);
+  const tierField = buildTierField(tieredModels, flags);
   if (stopWhen === "") {
     return {
       includeStopField: false,
@@ -210,6 +237,7 @@ function buildResumeSchemaOptions(
       ...(commitFields.length === 0 ? {} : { commitFields }),
       topLevelAgent,
       ...(tieredModels === undefined ? {} : { tieredModels }),
+      ...(tierField === undefined ? {} : { tierField }),
     };
   }
   return buildSchemaOptions(
@@ -217,6 +245,7 @@ function buildResumeSchemaOptions(
     commitMessage,
     topLevelAgent,
     tieredModels,
+    flags,
   );
 }
 
@@ -609,6 +638,14 @@ program
     false,
   )
   .option(
+    "--tier <name>",
+    "Pin this run to the given tier (requires tieredModels.enabled)",
+  )
+  .option(
+    "--no-classifier",
+    "Disable tier classifier for this run (equivalent to classifier.mode=off)",
+  )
+  .option(
     "--meteor-frequency <n>",
     "Meteor frequency from 0 to 5 (0 disables, 3 is default)",
     parseMeteorFrequency,
@@ -629,6 +666,8 @@ program
         push: boolean;
         meteorFrequency: number;
         mock: boolean;
+        tier?: string;
+        classifier?: boolean;
       },
     ) => {
       if (options.mock) {
@@ -722,11 +761,38 @@ program
         options.stopWhen === "" ? undefined : options.stopWhen;
       let effectiveStopWhen = cliStopWhen;
       let effectiveCommitMessage = config.commitMessage;
+      // Commander turns --no-classifier into options.classifier=false; the
+      // default is undefined (treat as on).
+      const disableClassifier = options.classifier === false;
+      const pinTier = options.tier;
+
+      if (pinTier !== undefined && config.tieredModels === undefined) {
+        console.error(
+          `--tier requires tieredModels.enabled in ~/.gnhf/config.yml.`,
+        );
+        process.exit(1);
+      }
+      if (
+        pinTier !== undefined &&
+        config.tieredModels !== undefined &&
+        !(pinTier in config.tieredModels.tiers)
+      ) {
+        const available = Object.keys(config.tieredModels.tiers).join(", ");
+        console.error(
+          `Unknown tier "${pinTier}". Configured tiers: ${available}.`,
+        );
+        process.exit(1);
+      }
+
+      const schemaFlags: SchemaOptionFlags = {
+        disableClassifier: disableClassifier || pinTier !== undefined,
+      };
       let schemaOptions = buildSchemaOptions(
         effectiveStopWhen,
         effectiveCommitMessage,
         config.agent,
         config.tieredModels,
+        schemaFlags,
       );
 
       let runInfo;
@@ -754,6 +820,7 @@ program
             effectiveCommitMessage,
             config.agent,
             config.tieredModels,
+            schemaFlags,
           ),
         );
         runInfo = wt.runInfo;
@@ -770,6 +837,7 @@ program
             effectiveCommitMessage,
             config.agent,
             runInfo.tieredModels,
+            schemaFlags,
           );
           startIteration = getLastIterationNumber(runInfo);
           console.error(
@@ -809,6 +877,7 @@ program
             effectiveCommitMessage,
             config.agent,
             config.tieredModels,
+            schemaFlags,
           ),
         );
 
@@ -821,6 +890,7 @@ program
             effectiveCommitMessage,
             config.agent,
             existing.tieredModels,
+            schemaFlags,
           );
           startIteration = getLastIterationNumber(existing);
         } else {
@@ -844,6 +914,7 @@ program
               existingMetadata.commitMessage,
               config.agent,
               config.tieredModels,
+              schemaFlags,
             ),
           );
           const resumeStopWhen = existing.stopWhen;
@@ -852,6 +923,7 @@ program
             existing.commitMessage,
             config.agent,
             existing.tieredModels,
+            schemaFlags,
           );
           prompt = existingPrompt;
           runInfo = existing;
@@ -880,6 +952,7 @@ program
                 existingMetadata.commitMessage,
                 config.agent,
                 config.tieredModels,
+                schemaFlags,
               ),
             );
             const resumeStopWhen = existing.stopWhen;
@@ -888,6 +961,7 @@ program
               existing.commitMessage,
               config.agent,
               existing.tieredModels,
+              schemaFlags,
             );
             runInfo = setupRun(
               existingRunId,
@@ -908,6 +982,7 @@ program
               effectiveCommitMessage,
               config.agent,
               config.tieredModels,
+              schemaFlags,
             );
             runInfo = initializeNewBranch(prompt, cwd, schemaOptions);
           } else {
@@ -1015,6 +1090,8 @@ program
           maxTokens: options.maxTokens,
           stopWhen: effectiveStopWhen,
           ...(options.push ? { push: true } : {}),
+          ...(pinTier === undefined ? {} : { pinTier }),
+          ...(disableClassifier ? { disableClassifier: true } : {}),
         },
       );
       let shutdownSignal: NodeJS.Signals | null = null;
@@ -1164,6 +1241,12 @@ program
           worktreePath,
         });
 
+        const tieredModelsEnabled = runInfo.tieredModels !== undefined;
+        const localTiers = tieredModelsEnabled
+          ? Object.entries(runInfo.tieredModels!.tiers)
+              .filter(([, tier]) => tier.local === true)
+              .map(([name]) => name)
+          : [];
         telemetry.track("run", {
           agent: telemetryAgent,
           mode: runMode,
@@ -1180,6 +1263,19 @@ program
           push_each_iteration: options.push === true,
           commit_message_preset: effectiveCommitMessage?.preset ?? "default",
           stop_when_set: effectiveStopWhen !== undefined,
+          tiered_models_enabled: tieredModelsEnabled,
+          classifier_mode: tieredModelsEnabled
+            ? disableClassifier || pinTier !== undefined
+              ? "off"
+              : runInfo.tieredModels!.classifier.mode
+            : undefined,
+          tier_pinned: pinTier !== undefined,
+          tier_iteration_counts: finalState.tierIterationCounts,
+          tier_input_tokens: finalState.inputTokensByTier,
+          tier_output_tokens: finalState.outputTokensByTier,
+          local_tiers: localTiers,
+          billable_input_tokens: finalState.billableInputTokens,
+          billable_output_tokens: finalState.billableOutputTokens,
         });
         await telemetry.close(1_000);
 
