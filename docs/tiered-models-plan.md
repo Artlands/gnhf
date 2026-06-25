@@ -1,6 +1,9 @@
-# Tiered-model routing — implementation plan
+# Tiered-model routing - implementation plan
 
-Status: design, not yet implemented. Hand this file to an agent to build from.
+Status: Phase 1 infrastructure is implemented. Self-classification, router
+plans, CLI tier pinning flags, prompt tier-selection flow, per-tier token
+budgets, renderer summaries, and tier telemetry remain planned follow-up
+phases.
 
 ## Goal
 
@@ -12,12 +15,15 @@ disabled.
 
 ## Constraints from the existing code
 
-Anchor points the implementation must integrate with:
+Anchor points the remaining implementation must integrate with:
 
-- `Agent` is instantiated **once per run** in `src/core/agents/factory.ts`. The
-  orchestrator calls `agent.run(...)` in a loop with no model knob.
-- Model choice today flows through `agentArgsOverride` in `~/.gnhf/config.yml`
-  (e.g. `claude: ["--model", "sonnet"]`). It is per-run, not per-iteration.
+- Phase 1 introduced `AgentProvider` in `src/core/agents/factory.ts`. The
+  orchestrator asks the provider for the default tier's agent, but
+  self-classification and router phases still need to choose non-default tiers
+  per iteration.
+- Model choice without tiered models still flows through `agentArgsOverride` in
+  `~/.gnhf/config.yml` (e.g. `claude: ["--model", "sonnet"]`). With
+  `tieredModels.enabled`, model-class flags move into tier args.
 - The output schema is fixed at run start. `src/core/run.ts` writes
   `.gnhf/runs/<id>/output-schema.json` once. `buildAgentOutputSchema`
   (`src/core/agents/types.ts`) is the single source of truth.
@@ -103,21 +109,21 @@ Field rules:
 
 ### 2. Per-iteration agent construction
 
-Replace the single-`Agent`-per-run contract with an agent provider.
+Phase 1 replaced the single-`Agent`-per-run contract with an agent provider.
 
 ```ts
 // src/core/agents/factory.ts
 export interface AgentProvider {
   defaultTier: string;
   tiers: readonly string[];
+  tieredModels: TieredModelsConfig | undefined;
   getAgentFor(tier: string): Agent;
-  close(): Promise<void>;
+  close(): Promise<void> | void;
 }
 
 export function createAgentProvider(
-  spec: AgentSpec,
-  runInfo: RunInfo,
   config: Config,
+  runInfo: RunInfo,
   options: CreateAgentOptions,
 ): AgentProvider;
 ```
@@ -132,9 +138,8 @@ Behavior:
   it, so a run that never selects a tier never spawns that tier's process tree.
   This matters because `rovodev`/`opencode` would otherwise start managed
   servers nobody uses.
-- `provider.close()` closes every cached agent. Slot this into the existing
-  shutdown path in `orchestrator.ts:808` (`closeAgent` becomes
-  `closeProvider`).
+- `provider.close()` closes every cached agent. This is wired through the
+  existing shutdown path in `orchestrator.ts`.
 
 The orchestrator now holds an `AgentProvider`, not an `Agent`. Per iteration it
 resolves `agent = provider.getAgentFor(tier)` and calls `.run(...)` on that.
@@ -313,8 +318,8 @@ top-level `agent: claude`, tier `simple` has `agent: codex`), the tier's `args`
 map is validated against the **tier's effective agent**, not the top-level
 agent. So `tieredModels.tiers.simple.args.codex` is the relevant entry, and it
 is validated under `codex`'s reserved-arg rules. The tier's `args` map for
-agents other than the effective agent is ignored (with a warning at config
-load).
+agents other than the effective agent is rejected at config load so typos are
+not silently ignored.
 
 **Flag dedup at splice time.** When tier args set a model-class flag that also
 appears in the top-level `agentArgsOverride`, drop the top-level occurrence at
@@ -327,25 +332,28 @@ overrides via env-injected args.
 
 ### 7. Schema, persistence, and resume
 
-New per-run metadata files under `.gnhf/runs/<id>/`:
+Per-run metadata files under `.gnhf/runs/<id>/`:
 
 - `tier-config.json` — frozen copy of the resolved `tieredModels` block at run
   start. Resume reads this, not `~/.gnhf/config.yml`. Same rationale as the
   existing `commit-message` file: a config change mid-run must not silently
-  retarget already-decided iterations.
+  retarget already-decided iterations. This file is implemented in Phase 1.
 - `tier-plan.json` — present only when `classifier.mode` includes router.
   Shape: `{ tiers: string[], plan: string[], rationale: string, consumed: number }`.
+  Planned for the router phase.
 - `tier-history.jsonl` — append-only, one line per iteration:
   ```json
   {"iteration": 1, "tier": "complex", "source": "router", "ts": "..."}
   ```
   `source` is one of: `default`, `self`, `router`, `override` (CLI `--tier`),
   `failure-fallback`, `commit-repair`, `agent-error`. This is the auditability
-  hook for "why did this run burn so many Opus tokens?"
+  hook for "why did this run burn so many Opus tokens?" Planned for the
+  self-classification phase.
 
-Update `RunInfo` and `RunSchemaOptions` (`src/core/run.ts`) to surface these.
-`setupRun` writes `tier-config.json`; `resumeRun` reads it and uses it instead
-of the live config block.
+Update `RunInfo` and `RunSchemaOptions` (`src/core/run.ts`) to surface tier
+metadata. Phase 1 surfaces `tier-config.json`: `setupRun` writes it, and
+`resumeRun` reads it and uses it instead of the live config block. Router and
+history files will add their own metadata fields in later phases.
 
 **Backwards compatibility on resume.** A run started before this feature exists
 has no `tier-config.json`. `resumeRun` must treat the absence of the file as
@@ -438,8 +446,8 @@ Out of scope for MVP. Guard against breakage:
 | codex     | Yes                                                              |
 | copilot   | Yes                                                              |
 | pi        | Yes                                                              |
-| rovodev   | No (single tier only). Stretch: per-tier managed server          |
-| opencode  | No (single tier only). Stretch: per-tier managed server          |
+| rovodev   | Whole-agent swap only; no args-only tiering or per-tier managed server |
+| opencode  | Whole-agent swap only; no args-only tiering or per-tier managed server |
 | acp       | Whole-agent swap only — tier can set `agent: acp:<target>` and use its own session |
 
 Enforce at config-load time: if `tieredModels.enabled` is true and the top-level
@@ -580,19 +588,19 @@ Enforce at config load (and on `tier-config.json` read on resume):
     `router+self`, and must be a key of `tiers`. Ignored when
     `mode in (off, agent-self)`.
   - Each `TierDef.agent`, if present, must satisfy `isAgentSpec`.
-  - Each `TierDef.args[name]` is validated under `isReservedAgentArg` with the
-    **tier's effective agent** (see §6), with `tieredModelsEnabled: true`.
-  - `TierDef.acpRegistryOverrides` is meaningful only when the tier's
-    effective agent is an `acp:` spec. If set on a tier whose effective agent
-    is native, emit a warning at load time and ignore the field. Do not
-    error — users may set the field while iterating on config.
+  - Each `TierDef.args[name]` must match the **tier's effective agent** (see
+    §6). Model-class flags are allowed inside tier args; other gnhf-managed
+    flags are still rejected.
+  - `TierDef.acpRegistryOverrides` is accepted and persisted on any tier. At
+    agent construction time it is merged into the ACP registry override map;
+    it only affects tiers that resolve to an `acp:` spec.
   - `TierDef.description` is optional. If absent, the iteration prompt uses
     the tier name alone, which is less informative for the agent.
   - `TierDef.local` is optional; default `false`. Setting it on a tier whose
     effective agent is a known hosted service (e.g. `claude`, `codex`,
     `copilot`) is not auto-rejected — users may proxy through a local
-    gateway. Emit a debug-log line at run start noting the tier is marked
-    local so it is auditable.
+    gateway. A later token-budget phase should emit a debug-log line at run
+    start noting the tier is marked local so it is auditable.
 - Top-level constraints:
   - When `enabled: true` and the top-level `agent` is `rovodev` /
     `opencode` / `acp:*`, every configured tier must set `tier.agent` (i.e.
@@ -604,10 +612,10 @@ Enforce at config load (and on `tier-config.json` read on resume):
 
 **Degenerate cases:**
 
-- Exactly one tier configured: classifier mode is forced to `off` regardless
-  of the configured value. Log via `appendDebugLog("classifier:auto-off",
-  { reason: "single-tier" })`. The schema does not get the
-  `next_iteration_tier` field.
+- Exactly one tier configured: planned behavior is to force classifier mode to
+  `off` regardless of the configured value and log via
+  `appendDebugLog("classifier:auto-off", { reason: "single-tier" })`. Phase 1
+  does not yet run the classifier or add the `next_iteration_tier` field.
 - `--tier <name>` CLI flag pins for the run: classifier mode is treated as
   `off` for this invocation. Schema does not include `next_iteration_tier`.
 - `--no-classifier` CLI flag: same effect as `mode: off` for this invocation.
