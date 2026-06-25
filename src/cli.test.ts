@@ -726,7 +726,11 @@ describe("cli", () => {
       stubRunInfo,
       undefined,
       ["-m", "gpt-5.4", "--full-auto"],
-      { includeStopField: false, acpRegistryOverrides: {} },
+      {
+        includeStopField: false,
+        topLevelAgent: "codex",
+        acpRegistryOverrides: {},
+      },
     );
   });
 
@@ -884,6 +888,7 @@ describe("cli", () => {
       undefined,
       {
         includeStopField: true,
+        topLevelAgent: "codex",
         stopWhen: "all tests pass",
         acpRegistryOverrides: {},
       },
@@ -903,6 +908,7 @@ describe("cli", () => {
 
     const expectedSchemaOptions = {
       includeStopField: false,
+      topLevelAgent: "codex",
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
       commitFields: [
         {
@@ -954,6 +960,7 @@ describe("cli", () => {
 
     const expectedSchemaOptions = {
       includeStopField: true,
+      topLevelAgent: "codex",
       stopWhen: "all checks pass",
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
       commitFields: [
@@ -1001,6 +1008,7 @@ describe("cli", () => {
       undefined,
       {
         includeStopField: true,
+        topLevelAgent: "claude",
         stopWhen: "all tests pass",
         acpRegistryOverrides: {},
       },
@@ -1063,7 +1071,11 @@ describe("cli", () => {
       expect.objectContaining({ stopWhen: undefined }),
       undefined,
       undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
+      {
+        includeStopField: false,
+        topLevelAgent: "claude",
+        acpRegistryOverrides: {},
+      },
     );
     expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
       maxIterations: undefined,
@@ -1087,7 +1099,11 @@ describe("cli", () => {
       expect.objectContaining({ commitMessage: undefined }),
       undefined,
       undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
+      {
+        includeStopField: false,
+        topLevelAgent: "claude",
+        acpRegistryOverrides: {},
+      },
     );
     expect(orchestratorCtor.mock.calls[0]?.[0]).toMatchObject({
       commitMessage: undefined,
@@ -1231,7 +1247,7 @@ describe("cli", () => {
       "ship it",
       "abc123",
       process.cwd(),
-      { includeStopField: false },
+      { includeStopField: false, topLevelAgent: "claude" },
     );
     expect(orchestratorCtor.mock.calls[0]?.[4]).toBe(process.cwd());
   });
@@ -1268,6 +1284,7 @@ describe("cli", () => {
 
       expect(resumeRun).toHaveBeenCalledWith(runId, effectiveTempDir, {
         includeStopField: false,
+        topLevelAgent: "claude",
       });
       expect(setupRun).not.toHaveBeenCalled();
       expect(getLastIterationNumber).toHaveBeenCalledWith(
@@ -1316,6 +1333,7 @@ describe("cli", () => {
       expect(ensureCleanWorkingTree).toHaveBeenCalledWith(effectiveTempDir);
       expect(resumeRun).toHaveBeenCalledWith(runId, effectiveTempDir, {
         includeStopField: false,
+        topLevelAgent: "claude",
       });
     } finally {
       process.chdir(originalCwd);
@@ -2519,13 +2537,14 @@ describe("cli", () => {
       expect(resumeRun).toHaveBeenCalledTimes(1);
       expect(resumeRun).toHaveBeenCalledWith("existing-run", process.cwd(), {
         includeStopField: false,
+        topLevelAgent: "claude",
       });
       expect(setupRun).toHaveBeenCalledWith(
         "existing-run",
         "new prompt",
         "abc123",
         process.cwd(),
-        { includeStopField: false },
+        { includeStopField: false, topLevelAgent: "claude" },
       );
       expect(orchestratorCtor).toHaveBeenCalledTimes(1);
       expect(orchestratorCtor.mock.calls[0]?.[5]).toBe(3);
@@ -3365,7 +3384,7 @@ describe("cli", () => {
       expect(resumeRun).toHaveBeenCalledWith(
         suffixedRunId,
         suffixedWorktreePath,
-        { includeStopField: false },
+        { includeStopField: false, topLevelAgent: "claude" },
       );
       expect(createWorktree).not.toHaveBeenCalled();
       expect(orchestratorCtor.mock.calls[0]?.[4]).toBe(suffixedWorktreePath);
@@ -3419,10 +3438,12 @@ describe("cli", () => {
 
       expect(resumeRun).toHaveBeenCalledWith(runId, worktreePath, {
         includeStopField: false,
+        topLevelAgent: "claude",
         clearStopWhen: true,
       });
       expect(createAgent.mock.calls[0]?.[4]).toEqual({
         includeStopField: false,
+        topLevelAgent: "claude",
         acpRegistryOverrides: {},
       });
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
@@ -3485,7 +3506,7 @@ describe("cli", () => {
       expect(resumeRun).toHaveBeenCalledWith(
         suffixedRunId,
         suffixedWorktreePath,
-        { includeStopField: false },
+        { includeStopField: false, topLevelAgent: "claude" },
       );
       expect(createWorktree).not.toHaveBeenCalled();
       expect(orchestratorCtor.mock.calls[0]?.[4]).toBe(suffixedWorktreePath);
@@ -3540,6 +3561,7 @@ describe("cli", () => {
 
       expect(createAgent.mock.calls[0]?.[4]).toEqual({
         includeStopField: false,
+        topLevelAgent: "claude",
         acpRegistryOverrides: {},
       });
       expect(orchestratorCtor.mock.calls[0]?.[0]).toEqual(
