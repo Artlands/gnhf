@@ -489,15 +489,8 @@ export function appendTierHistory(
   appendFileSync(tierHistoryPath, line, "utf-8");
 }
 
-export function writeTierPlan(
-  tierPlanPath: string,
-  plan: TierPlan,
-): void {
-  writeFileSync(
-    tierPlanPath,
-    `${JSON.stringify(plan, null, 2)}\n`,
-    "utf-8",
-  );
+export function writeTierPlan(tierPlanPath: string, plan: TierPlan): void {
+  writeFileSync(tierPlanPath, `${JSON.stringify(plan, null, 2)}\n`, "utf-8");
 }
 
 export function readTierPlan(tierPlanPath: string): TierPlan | null {

@@ -7,10 +7,19 @@ import {
   type TokenUsage,
 } from "./agents/types.js";
 import type { AgentProvider } from "./agents/factory.js";
-import { runUpfrontClassifier, runRouterClassifier } from "./agents/classifier.js";
+import {
+  runUpfrontClassifier,
+  runRouterClassifier,
+} from "./agents/classifier.js";
 import { redactAgentSpecForLogs, type Config } from "./config.js";
 import type { RunInfo, TierHistorySource, TierPlan } from "./run.js";
-import { appendNotes, appendTierHistory, toStringArray, writeTierPlan, readTierPlan } from "./run.js";
+import {
+  appendNotes,
+  appendTierHistory,
+  toStringArray,
+  writeTierPlan,
+  readTierPlan,
+} from "./run.js";
 import {
   CLASSIFIER_TIER_NAME,
   classifierUsesRouter,
@@ -1062,8 +1071,7 @@ ${this.pendingCommitFailure}
         this.state.currentTier = this.nextTier;
         this.recordTierHistory("self");
       } else {
-        this.state.currentTier =
-          this.tierPlan.tiers[this.tierPlan.consumed];
+        this.state.currentTier = this.tierPlan.tiers[this.tierPlan.consumed];
         this.recordTierHistory("router");
       }
       this.tierPlan.consumed++;
@@ -1187,9 +1195,7 @@ ${this.pendingCommitFailure}
         });
 
         // Validate each tier name
-        const invalidTier = result.tiers.find(
-          (t) => !this.validateTierName(t),
-        );
+        const invalidTier = result.tiers.find((t) => !this.validateTierName(t));
         if (invalidTier) {
           appendDebugLog("classifier:fallback", {
             reason: "invalid-tier-in-plan",
