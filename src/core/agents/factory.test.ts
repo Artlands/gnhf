@@ -114,6 +114,7 @@ const stubRunInfo: RunInfo = {
   tierConfigPath: "/repo/.gnhf/runs/test-run/tier-config.json",
   tieredModels: undefined,
   tierHistoryPath: "/repo/.gnhf/runs/test-run/tier-history.jsonl",
+  tierPlanPath: "/repo/.gnhf/runs/test-run/tier-plan.json",
 };
 
 const acpSessionStateDir = join(stubRunInfo.runDir, "acp-sessions");

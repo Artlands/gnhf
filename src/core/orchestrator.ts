@@ -7,12 +7,13 @@ import {
   type TokenUsage,
 } from "./agents/types.js";
 import type { AgentProvider } from "./agents/factory.js";
-import { runUpfrontClassifier } from "./agents/classifier.js";
+import { runUpfrontClassifier, runRouterClassifier } from "./agents/classifier.js";
 import { redactAgentSpecForLogs, type Config } from "./config.js";
-import type { RunInfo, TierHistorySource } from "./run.js";
-import { appendNotes, appendTierHistory, toStringArray } from "./run.js";
+import type { RunInfo, TierHistorySource, TierPlan } from "./run.js";
+import { appendNotes, appendTierHistory, toStringArray, writeTierPlan, readTierPlan } from "./run.js";
 import {
   CLASSIFIER_TIER_NAME,
+  classifierUsesRouter,
   classifierUsesSelf,
   getTierNames,
   isLocalTier,
@@ -157,6 +158,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private nextTier: string;
   private nextTierSource: TierHistorySource;
   private classifierAttempted = false;
+  private tierPlan: TierPlan | null = null;
 
   private state: Omit<
     OrchestratorState,
@@ -221,6 +223,23 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     } else {
       this.nextTier = defaultTier;
       this.nextTierSource = "default";
+    }
+
+    // Load persisted tier plan on resume
+    if (startIteration > 0 && this.routerActive()) {
+      const plan = readTierPlan(this.runInfo.tierPlanPath);
+      if (plan) {
+        this.tierPlan = {
+          tiers: plan.tiers,
+          plan: plan.plan,
+          rationale: plan.rationale,
+          consumed: plan.consumed,
+        };
+        appendDebugLog("tier:plan-resumed", {
+          consumed: plan.consumed,
+          remaining: plan.tiers.length - plan.consumed,
+        });
+      }
     }
   }
 
@@ -958,6 +977,13 @@ ${this.pendingCommitFailure}
     return classifierUsesSelf(this.runInfo.tieredModels!.classifier.mode);
   }
 
+  private routerActive(): boolean {
+    if (!this.tieredModelsActive()) return false;
+    if (this.limits.disableClassifier === true) return false;
+    if (this.limits.pinTier !== undefined) return false;
+    return classifierUsesRouter(this.runInfo.tieredModels!.classifier.mode);
+  }
+
   private buildTierSelectionInfo():
     | {
         fieldName: string;
@@ -1024,6 +1050,29 @@ ${this.pendingCommitFailure}
       this.recordTierHistory("override");
       return;
     }
+
+    // Router plan consumption
+    if (
+      this.tierPlan !== null &&
+      this.tierPlan.consumed < this.tierPlan.tiers.length
+    ) {
+      // In router+self mode, the previous iteration's self-classification
+      // (stored in nextTier with source "self") overrides this plan slot.
+      if (this.classifierActive() && this.nextTierSource === "self") {
+        this.state.currentTier = this.nextTier;
+        this.recordTierHistory("self");
+      } else {
+        this.state.currentTier =
+          this.tierPlan.tiers[this.tierPlan.consumed];
+        this.recordTierHistory("router");
+      }
+      this.tierPlan.consumed++;
+      // Persist updated consumed count so resume picks up correctly
+      writeTierPlan(this.runInfo.tierPlanPath, this.tierPlan);
+      return;
+    }
+
+    // Plan exhausted (or no plan): use the existing nextTier path
     this.state.currentTier = this.nextTier;
     this.recordTierHistory(this.nextTierSource);
     // Reset for the next iteration; the iteration outcome overwrites this.
@@ -1052,7 +1101,7 @@ ${this.pendingCommitFailure}
 
   private shouldRunUpfrontClassifier(): boolean {
     if (this.classifierAttempted) return false;
-    if (!this.classifierActive()) return false;
+    if (!this.classifierActive() && !this.routerActive()) return false;
     if (this.state.currentIteration > 0) return false;
     return true;
   }
@@ -1061,7 +1110,7 @@ ${this.pendingCommitFailure}
     if (this.classifierAttempted) return;
     this.classifierAttempted = true;
 
-    if (!this.classifierActive()) return;
+    if (!this.classifierActive() && !this.routerActive()) return;
     if (this.state.currentIteration > 0) return;
 
     const tieredModels = this.runInfo.tieredModels!;
@@ -1123,32 +1172,81 @@ ${this.pendingCommitFailure}
     try {
       const agent = this.provider.getAgentFor(classifierTier);
       const classifierLogPath = join(this.runInfo.runDir, "classifier.jsonl");
-      const result = await runUpfrontClassifier({
-        agent,
-        objective: this.prompt,
-        cwd: this.cwd,
-        defaultTier: tieredModels.defaultTier,
-        tiers,
-        fieldName: "next_iteration_tier",
-        signal: controller.signal,
-        onUsage,
-        logPath: classifierLogPath,
-      });
-      if (this.validateTierName(result.tier)) {
-        this.nextTier = result.tier;
-        this.nextTierSource = "classifier";
-        appendDebugLog("classifier:end", {
+
+      if (this.routerActive()) {
+        // ====== ROUTER / ROUTER+SELF PATH ======
+        const result = await runRouterClassifier({
+          agent,
+          objective: this.prompt,
+          cwd: this.cwd,
+          defaultTier: tieredModels.defaultTier,
+          tiers,
+          signal: controller.signal,
+          onUsage,
+          logPath: classifierLogPath,
+        });
+
+        // Validate each tier name
+        const invalidTier = result.tiers.find(
+          (t) => !this.validateTierName(t),
+        );
+        if (invalidTier) {
+          appendDebugLog("classifier:fallback", {
+            reason: "invalid-tier-in-plan",
+            invalidTier,
+            elapsedMs: Date.now() - startedAt,
+          });
+          this.setNextTier(tieredModels.defaultTier, "default");
+          return;
+        }
+
+        // Persist plan and set first tier
+        const plan: TierPlan = {
+          tiers: result.tiers,
+          plan: result.plan,
+          rationale: result.rationale,
+          consumed: 0,
+        };
+        this.tierPlan = { ...plan, consumed: 0 };
+        writeTierPlan(this.runInfo.tierPlanPath, plan);
+
+        this.nextTier = result.tiers[0];
+        this.nextTierSource = "router";
+
+        appendDebugLog("classifier:router-plan", {
           elapsedMs: Date.now() - startedAt,
-          tier: result.tier,
+          tiers: result.tiers,
+          planLength: result.plan.length,
         });
       } else {
-        appendDebugLog("classifier:fallback", {
-          reason: "tier-not-configured",
-          requested: result.tier,
-          fallback: tieredModels.defaultTier,
-          elapsedMs: Date.now() - startedAt,
+        // ====== AGENT-SELF PATH (existing) ======
+        const result = await runUpfrontClassifier({
+          agent,
+          objective: this.prompt,
+          cwd: this.cwd,
+          defaultTier: tieredModels.defaultTier,
+          tiers,
+          fieldName: "next_iteration_tier",
+          signal: controller.signal,
+          onUsage,
+          logPath: classifierLogPath,
         });
-        this.setNextTier(tieredModels.defaultTier, "default");
+        if (this.validateTierName(result.tier)) {
+          this.nextTier = result.tier;
+          this.nextTierSource = "classifier";
+          appendDebugLog("classifier:end", {
+            elapsedMs: Date.now() - startedAt,
+            tier: result.tier,
+          });
+        } else {
+          appendDebugLog("classifier:fallback", {
+            reason: "tier-not-configured",
+            requested: result.tier,
+            fallback: tieredModels.defaultTier,
+            elapsedMs: Date.now() - startedAt,
+          });
+          this.setNextTier(tieredModels.defaultTier, "default");
+        }
       }
     } catch (err) {
       appendDebugLog("classifier:fallback", {

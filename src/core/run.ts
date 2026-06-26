@@ -41,6 +41,7 @@ export interface RunInfo {
   tierConfigPath: string;
   tieredModels: TieredModelsConfig | undefined;
   tierHistoryPath: string;
+  tierPlanPath: string;
 }
 
 export interface RunMetadata {
@@ -57,6 +58,14 @@ const STOP_WHEN_FILENAME = "stop-when";
 const COMMIT_MESSAGE_FILENAME = "commit-message";
 const TIER_CONFIG_FILENAME = "tier-config.json";
 const TIER_HISTORY_FILENAME = "tier-history.jsonl";
+const TIER_PLAN_FILENAME = "tier-plan.json";
+
+export interface TierPlan {
+  tiers: string[];
+  plan: string[];
+  rationale: string;
+  consumed: number;
+}
 
 function writeSchemaFile(
   schemaPath: string,
@@ -321,6 +330,7 @@ export function setupRun(
     tierConfigPath,
     tieredModels,
     tierHistoryPath: join(runDir, TIER_HISTORY_FILENAME),
+    tierPlanPath: join(runDir, TIER_PLAN_FILENAME),
   };
 }
 
@@ -384,6 +394,7 @@ export function resumeRun(
     tierConfigPath,
     tieredModels,
     tierHistoryPath: join(runDir, TIER_HISTORY_FILENAME),
+    tierPlanPath: join(runDir, TIER_PLAN_FILENAME),
   };
 }
 
@@ -461,7 +472,8 @@ export type TierHistorySource =
   | "override"
   | "failure-fallback"
   | "commit-repair"
-  | "agent-error";
+  | "agent-error"
+  | "router";
 
 export interface TierHistoryEntry {
   iteration: number;
@@ -475,6 +487,41 @@ export function appendTierHistory(
 ): void {
   const line = `${JSON.stringify({ ...entry, ts: new Date().toISOString() })}\n`;
   appendFileSync(tierHistoryPath, line, "utf-8");
+}
+
+export function writeTierPlan(
+  tierPlanPath: string,
+  plan: TierPlan,
+): void {
+  writeFileSync(
+    tierPlanPath,
+    `${JSON.stringify(plan, null, 2)}\n`,
+    "utf-8",
+  );
+}
+
+export function readTierPlan(tierPlanPath: string): TierPlan | null {
+  try {
+    if (!existsSync(tierPlanPath)) return null;
+    const raw = readFileSync(tierPlanPath, "utf-8").trim();
+    if (raw === "") return null;
+    const parsed = JSON.parse(raw) as TierPlan;
+    if (
+      !Array.isArray(parsed.tiers) ||
+      !Array.isArray(parsed.plan) ||
+      typeof parsed.rationale !== "string" ||
+      typeof parsed.consumed !== "number"
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function deleteTierPlan(tierPlanPath: string): void {
+  rmSync(tierPlanPath, { force: true });
 }
 
 export function appendNotes(

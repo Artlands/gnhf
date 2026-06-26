@@ -18,6 +18,8 @@ vi.mock("./run.js", async (importOriginal) => {
   return {
     ...actual,
     appendNotes: vi.fn(),
+    writeTierPlan: vi.fn(),
+    readTierPlan: vi.fn(() => null),
   };
 });
 
@@ -84,6 +86,7 @@ const runInfo: RunInfo = {
   tierConfigPath: "/repo/.gnhf/runs/run-abc/tier-config.json",
   tieredModels: undefined,
   tierHistoryPath: "/repo/.gnhf/runs/run-abc/tier-history.jsonl",
+  tierPlanPath: "/repo/.gnhf/runs/run-abc/tier-plan.json",
 };
 
 function createSuccessResult(summary = "done"): AgentResult {
@@ -1996,5 +1999,251 @@ describe("Orchestrator tier selection", () => {
     // We hit maxIterations, not maxTokens.
     expect(abort).toHaveBeenCalledWith("max iterations reached (3)");
     expect(orchestrator.getState().billableInputTokens).toBe(0);
+  });
+
+  it("router mode: consumes tiers from the plan produced by the upfront classifier", async () => {
+    const routerCfg = {
+      ...tieredModels,
+      classifier: { mode: "router" as const, routerTier: "complex" },
+    };
+
+    const usedTiers: string[] = [];
+    let classifierCallCount = 0;
+
+    const provider = {
+      defaultTier: routerCfg.defaultTier,
+      tiers: ["complex", "simple"],
+      tieredModels: routerCfg,
+      getAgentFor: (tier: string) => {
+        usedTiers.push(tier);
+        const agent: Agent = {
+          name: `claude:${tier}`,
+          run: vi.fn(async (_p, _c, opts) => {
+            classifierCallCount++;
+            if (classifierCallCount === 1) {
+              // Router classifier call: produce a plan via onMessage
+              opts?.onMessage?.(
+                '{"tiers":["simple","complex"],"plan":["first step","second step"],"rationale":"iterate"}',
+              );
+              opts?.onUsage?.({
+                inputTokens: 10,
+                outputTokens: 5,
+                cacheReadTokens: 0,
+                cacheCreationTokens: 0,
+              });
+              return {
+                output: {
+                  success: true,
+                  summary: "classifier",
+                  key_changes_made: [],
+                  key_learnings: [],
+                },
+                usage: {
+                  inputTokens: 10,
+                  outputTokens: 5,
+                  cacheReadTokens: 0,
+                  cacheCreationTokens: 0,
+                },
+              };
+            }
+            opts?.onUsage?.({
+              inputTokens: 5,
+              outputTokens: 2,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            });
+            return {
+              output: {
+                success: true,
+                summary: "done",
+                key_changes_made: ["x.ts"],
+                key_learnings: [],
+              },
+              usage: {
+                inputTokens: 5,
+                outputTokens: 2,
+                cacheReadTokens: 0,
+                cacheCreationTokens: 0,
+              },
+            };
+          }),
+        };
+        return agent;
+      },
+      close: async () => undefined,
+    };
+
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      { ...runInfo, tieredModels: routerCfg },
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 3, disableClassifier: false },
+    );
+
+    await orchestrator.start();
+
+    // getAgentFor call order: start-debug="complex", classifierTier="complex",
+    // iteration plan[0]="simple", plan[1]="complex", plan-exhausted->defaultTier="complex"
+    expect(usedTiers).toEqual([
+      "complex",
+      "complex",
+      "simple",
+      "complex",
+      "complex",
+    ]);
+  });
+
+  it("router mode: classifier failure falls back to defaultTier for all iterations", async () => {
+    const routerCfg = {
+      ...tieredModels,
+      classifier: { mode: "router" as const, routerTier: "complex" },
+    };
+
+    let classifierCallCountForFail = 0;
+    const provider = {
+      defaultTier: routerCfg.defaultTier,
+      tiers: ["complex", "simple"],
+      tieredModels: routerCfg,
+      getAgentFor: () => {
+        const agent: Agent = {
+          name: "claude",
+          run: vi.fn(async () => {
+            classifierCallCountForFail++;
+            if (classifierCallCountForFail === 1) {
+              throw new PermanentAgentError("classifier failed");
+            }
+            return {
+              output: {
+                success: true,
+                summary: "done",
+                key_changes_made: ["x.ts"],
+                key_learnings: [],
+              },
+              usage: {
+                inputTokens: 5,
+                outputTokens: 2,
+                cacheReadTokens: 0,
+                cacheCreationTokens: 0,
+              },
+            };
+          }),
+        };
+        return agent;
+      },
+      close: async () => undefined,
+    };
+
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      { ...runInfo, tieredModels: routerCfg },
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 2, disableClassifier: false },
+    );
+
+    await orchestrator.start();
+
+    const state = orchestrator.getState();
+    expect(state.currentIteration).toBe(2);
+    // Both iterations fall back to defaultTier after classifier failure
+    expect(state.tierIterationCounts.complex).toBe(2);
+  });
+
+  it("router+self mode: agent self-classification overrides plan slots", async () => {
+    const routerSelfCfg = {
+      ...tieredModels,
+      classifier: { mode: "router+self" as const, routerTier: "complex" },
+    };
+
+    let classifierCallCountSelf = 0;
+    const usedOutputs: string[] = [];
+    const agentRun = vi.fn(async (_p: string, _c: string, opts?: unknown) => {
+      const o = opts as {
+        onMessage?: (t: string) => void;
+        onUsage?: (u: unknown) => void;
+      };
+      classifierCallCountSelf++;
+      if (classifierCallCountSelf === 1) {
+        // Classifier call
+        o?.onUsage?.({
+          inputTokens: 5,
+          outputTokens: 2,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        });
+        o?.onMessage?.(
+          '{"tiers":["simple","simple","complex"],"plan":["a","b","c"],"rationale":"plan"}',
+        );
+        return {
+          output: {
+            success: true,
+            summary: "classifier",
+            key_changes_made: [],
+            key_learnings: [],
+          },
+          usage: {
+            inputTokens: 5,
+            outputTokens: 2,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+          },
+        };
+      }
+      // Iteration call : each agent self-classifies to a different tier
+      const tiersForIteration = ["complex", "cheap", "simple"];
+      const idx = classifierCallCountSelf - 2;
+      usedOutputs.push(tiersForIteration[idx] ?? "complex");
+      o?.onUsage?.({
+        inputTokens: 3,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      });
+      return {
+        output: {
+          success: true,
+          summary: "done",
+          key_changes_made: ["x.ts"],
+          key_learnings: [],
+          next_iteration_tier: tiersForIteration[idx] ?? "complex",
+        },
+        usage: {
+          inputTokens: 3,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        },
+      };
+    });
+
+    const provider = {
+      defaultTier: routerSelfCfg.defaultTier,
+      tiers: ["complex", "simple", "cheap"],
+      tieredModels: routerSelfCfg,
+      getAgentFor: () => ({ name: "claude", run: agentRun }),
+      close: async () => undefined,
+    };
+
+    const orchestrator = new Orchestrator(
+      config,
+      provider,
+      { ...runInfo, tieredModels: routerSelfCfg },
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 3, disableClassifier: false },
+    );
+
+    await orchestrator.start();
+
+    const state = orchestrator.getState();
+    // 1 classifier call + 3 iterations
+    expect(agentRun).toHaveBeenCalledTimes(4);
+    expect(state.currentIteration).toBe(3);
   });
 });

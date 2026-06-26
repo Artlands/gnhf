@@ -47,6 +47,7 @@ import {
   resumeRun,
   peekRunMetadata,
   getLastIterationNumber,
+  deleteTierPlan,
 } from "./core/run.js";
 import { readStdinText } from "./core/stdin.js";
 import { startSleepPrevention } from "./core/sleep.js";
@@ -988,6 +989,24 @@ program
 
           if (answer === "o") {
             ensureCleanWorkingTree(cwd);
+
+            // When the prompt changes, the router plan built against the old
+            // prompt is stale — delete it so the orchestrator regenerates one.
+            if (existingMetadata.runDir) {
+              try {
+                const tierPlanPath = join(
+                  existingMetadata.runDir,
+                  "tier-plan.json",
+                );
+                deleteTierPlan(tierPlanPath);
+                appendDebugLog("classifier:plan-invalidated", {
+                  reason: "prompt-changed",
+                });
+              } catch {
+                // Best-effort cleanup
+              }
+            }
+
             const existing = resumeRun(
               existingRunId,
               cwd,
