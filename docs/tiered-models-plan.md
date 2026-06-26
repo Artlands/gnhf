@@ -1,11 +1,12 @@
 # Tiered-model routing - implementation plan
 
-Status: Phase 1 infrastructure and Phase 2 self-classification are
-implemented (`agent-self` mode with an upfront classifier call for iteration
-1, per-tier token accounting with billable-vs-local exclusion, the
-`--tier`/`--no-classifier` CLI flags, tier-history.jsonl, and tier
-telemetry). Router plans and the combined `router+self` mode remain planned
-follow-up phases.
+Status: Phase 1 infrastructure, Phase 2 self-classification, and Phase 3
+router classifier are implemented (`agent-self` mode with an upfront
+classifier call for iteration 1, `router` mode with a full tier plan,
+`router+self` combined mode, per-tier token accounting with
+billable-vs-local exclusion, the `--tier`/`--no-classifier` CLI flags,
+tier-history.jsonl, tier-plan.json, and tier telemetry). Per-tier
+`--max-tokens` and renderer tier breakdown remain follow-up enhancements.
 
 ## Goal
 
