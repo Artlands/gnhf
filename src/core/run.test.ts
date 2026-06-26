@@ -37,6 +37,7 @@ import {
   toStringArray,
 } from "./run.js";
 import { CONVENTIONAL_COMMIT_MESSAGE } from "./commit-message.js";
+import { InvalidConfigError } from "./config-errors.js";
 
 const P = "/project";
 
@@ -283,6 +284,10 @@ describe("setupRun", () => {
       stopWhen: undefined,
       commitMessagePath: join(runDir, "commit-message"),
       commitMessage: undefined,
+      tierConfigPath: join(runDir, "tier-config.json"),
+      tieredModels: undefined,
+      tierHistoryPath: join(runDir, "tier-history.jsonl"),
+      tierPlanPath: join(runDir, "tier-plan.json"),
     });
   });
 });
@@ -475,6 +480,200 @@ describe("resumeRun", () => {
 
     expect(mockGetHeadCommit).toHaveBeenCalledWith(P);
     expect(info.baseCommit).toBe("head456");
+  });
+
+  it("returns tieredModels undefined for legacy runs without tier-config.json", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    mockExistsSync.mockImplementation((path) => path === runDir);
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.tieredModels).toBeUndefined();
+    expect(info.tierConfigPath).toBe(join(runDir, "tier-config.json"));
+  });
+
+  it("reads a frozen tier-config.json when present", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const tierConfigPath = join(runDir, "tier-config.json");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === tierConfigPath,
+    );
+    const frozen = {
+      enabled: true,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: { complex: { args: { claude: ["--model", "opus"] } } },
+    };
+    mockReadFileSync.mockImplementation((path) =>
+      path === tierConfigPath ? JSON.stringify(frozen) : "",
+    );
+
+    const info = resumeRun("run-abc", P, { includeStopField: false });
+
+    expect(info.tieredModels).toEqual({
+      ...frozen,
+      tiers: { complex: { agent: "claude", ...frozen.tiers.complex } },
+    });
+  });
+
+  it("validates frozen tier-config.json metadata before returning it", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const tierConfigPath = join(runDir, "tier-config.json");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === tierConfigPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === tierConfigPath
+        ? JSON.stringify({
+            enabled: true,
+            defaultTier: "default",
+            classifier: { mode: "agent-self" },
+            tiers: { default: {} },
+          })
+        : "",
+    );
+
+    expect(() =>
+      resumeRun("run-abc", P, {
+        includeStopField: false,
+        topLevelAgent: "claude",
+      }),
+    ).toThrow(InvalidConfigError);
+    expect(() =>
+      resumeRun("run-abc", P, {
+        includeStopField: false,
+        topLevelAgent: "claude",
+      }),
+    ).toThrow(/Invalid run metadata.*tier-config\.json.*default.*reserved/);
+  });
+
+  it("reports invalid tier-config.json JSON as run metadata", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const tierConfigPath = join(runDir, "tier-config.json");
+    mockExistsSync.mockImplementation(
+      (path) => path === runDir || path === tierConfigPath,
+    );
+    mockReadFileSync.mockImplementation((path) =>
+      path === tierConfigPath ? "{" : "",
+    );
+
+    expect(() =>
+      resumeRun("run-abc", P, {
+        includeStopField: false,
+        topLevelAgent: "claude",
+      }),
+    ).toThrow(/Invalid run metadata.*tier-config\.json/);
+  });
+});
+
+describe("setupRun tieredModels persistence", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExecFileSync.mockReturnValue(".git/info/exclude\n");
+    mockExistsSync.mockImplementation(() => false);
+  });
+
+  it("writes tier-config.json on first setup when tieredModels is supplied", () => {
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: { complex: { args: { claude: ["--model", "opus"] } } },
+    };
+
+    setupRun("run-abc", "prompt", "abc123", P, {
+      includeStopField: false,
+      tieredModels,
+      topLevelAgent: "claude",
+    });
+
+    const tierCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("tier-config.json"),
+    );
+    expect(tierCall).toBeDefined();
+    expect(JSON.parse((tierCall![1] as string).trim())).toEqual({
+      ...tieredModels,
+      tiers: { complex: { agent: "claude", ...tieredModels.tiers.complex } },
+    });
+  });
+
+  it("freezes the top-level fallback agent into each tier", () => {
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: {
+        complex: { args: { codex: ["--model", "gpt-5"] } },
+        hosted: { agent: "acp:local-qwen" as const },
+      },
+    };
+
+    setupRun("run-abc", "prompt", "abc123", P, {
+      includeStopField: false,
+      tieredModels,
+      topLevelAgent: "codex",
+    });
+
+    const tierCall = mockWriteFileSync.mock.calls.find(
+      (call) =>
+        typeof call[0] === "string" && call[0].endsWith("tier-config.json"),
+    );
+    expect(tierCall).toBeDefined();
+    expect(JSON.parse((tierCall![1] as string).trim()).tiers).toEqual({
+      complex: { agent: "codex", args: { codex: ["--model", "gpt-5"] } },
+      hosted: { agent: "acp:local-qwen" },
+    });
+  });
+
+  it("does not write tier-config.json when tieredModels is undefined", () => {
+    setupRun("run-abc", "prompt", "abc123", P, {
+      includeStopField: false,
+    });
+
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      join(P, ".gnhf", "runs", "run-abc", "tier-config.json"),
+      expect.any(String),
+      "utf-8",
+    );
+  });
+
+  it("preserves an existing tier-config.json on overwrite (frozen on resume)", () => {
+    const runDir = join(P, ".gnhf", "runs", "run-abc");
+    const tierConfigPath = join(runDir, "tier-config.json");
+    const stored = {
+      enabled: true as const,
+      defaultTier: "complex",
+      classifier: { mode: "agent-self" as const },
+      tiers: { complex: {} },
+    };
+    mockExistsSync.mockImplementation((path) => path === tierConfigPath);
+    mockReadFileSync.mockImplementation((path) =>
+      path === tierConfigPath ? JSON.stringify(stored) : "",
+    );
+
+    const livePolicy = {
+      enabled: true as const,
+      defaultTier: "fast",
+      classifier: { mode: "router" as const, routerTier: "fast" },
+      tiers: { fast: {} },
+    };
+
+    const info = setupRun("run-abc", "prompt", "abc123", P, {
+      includeStopField: false,
+      tieredModels: livePolicy,
+    });
+
+    // tier-config.json should NOT have been written; stored config wins.
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      tierConfigPath,
+      expect.any(String),
+      "utf-8",
+    );
+    expect(info.tieredModels).toEqual({
+      ...stored,
+      tiers: { complex: { agent: "claude" } },
+    });
   });
 });
 

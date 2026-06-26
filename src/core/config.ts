@@ -5,6 +5,8 @@ import yaml from "js-yaml";
 import type { CommitMessageConfig } from "./commit-message.js";
 import { normalizeCommitMessageConfig } from "./commit-message-config.js";
 import { InvalidConfigError } from "./config-errors.js";
+import type { TieredModelsConfig } from "./tiered-models.js";
+import { normalizeTieredModelsConfig } from "./tiered-models-config.js";
 
 export const AGENT_NAMES = [
   "claude",
@@ -77,6 +79,7 @@ export interface Config {
   agentArgsOverride: Partial<Record<AgentName, string[]>>;
   acpRegistryOverrides: Record<string, string>;
   commitMessage?: CommitMessageConfig;
+  tieredModels?: TieredModelsConfig;
   maxConsecutiveFailures: number;
   preventSleep: boolean;
 }
@@ -108,7 +111,30 @@ function normalizePreventSleep(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function isReservedAgentArg(agent: AgentName, arg: string): boolean {
+function isModelClassFlag(agent: AgentName, arg: string): boolean {
+  switch (agent) {
+    case "claude":
+    case "copilot":
+    case "pi":
+      return arg === "--model" || arg.startsWith("--model=");
+    case "codex":
+      return arg === "-m" || arg === "--model" || arg.startsWith("--model=");
+    case "opencode":
+    case "rovodev":
+      // Managed-server agents are not in the tiered-routing support matrix.
+      // Their model selection still goes through agentArgsOverride.
+      return false;
+  }
+}
+
+export function isReservedAgentArg(
+  agent: AgentName,
+  arg: string,
+  opts: { tieredModelsEnabled: boolean } = { tieredModelsEnabled: false },
+): boolean {
+  if (opts.tieredModelsEnabled && isModelClassFlag(agent, arg)) {
+    return true;
+  }
   switch (agent) {
     case "claude":
       return (
@@ -194,6 +220,8 @@ function isReservedAgentArg(agent: AgentName, arg: string): boolean {
   }
 }
 
+export { isModelClassFlag };
+
 /**
  * Resolve a user-supplied path against the config directory (~/.gnhf).
  * Expands leading `~` or `~/` to the home directory, then resolves relative
@@ -262,6 +290,7 @@ function normalizeAgentExtraArgs(
   value: unknown,
   label: string,
   agent: AgentName,
+  opts: { tieredModelsEnabled: boolean },
 ): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value)) {
@@ -284,7 +313,12 @@ function normalizeAgentExtraArgs(
       );
     }
 
-    if (isReservedAgentArg(agent, trimmed)) {
+    if (isReservedAgentArg(agent, trimmed, opts)) {
+      if (opts.tieredModelsEnabled && isModelClassFlag(agent, trimmed)) {
+        throw new InvalidConfigError(
+          `Invalid config value for ${label}[${index}]: "${trimmed}" is managed by gnhf when tieredModels.enabled is true; move it to tieredModels.tiers.<name>.args.${agent}`,
+        );
+      }
       throw new InvalidConfigError(
         `Invalid config value for ${label}[${index}]: "${trimmed}" is managed by gnhf and cannot be overridden`,
       );
@@ -296,6 +330,7 @@ function normalizeAgentExtraArgs(
 
 function normalizeAgentArgsOverride(
   value: unknown,
+  opts: { tieredModelsEnabled: boolean },
 ): Partial<Record<AgentName, string[]>> | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "object" || Array.isArray(value)) {
@@ -319,6 +354,7 @@ function normalizeAgentArgsOverride(
       rawConfig,
       `agentArgsOverride.${key}`,
       key as AgentName,
+      opts,
     );
     if (args !== undefined) {
       result[key as AgentName] = args;
@@ -361,11 +397,22 @@ function normalizeAcpRegistryOverrides(
   return result;
 }
 
+function readsTieredModelsEnabled(raw: unknown): boolean {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return false;
+  }
+  return (raw as { enabled?: unknown }).enabled === true;
+}
+
 function normalizeConfig(
   config: Partial<Config>,
   configDir?: string,
 ): Partial<Config> {
   const normalized: Partial<Config> = { ...config };
+  const tieredModelsEnabled = readsTieredModelsEnabled(
+    (config as { tieredModels?: unknown }).tieredModels,
+  );
+  const argsOpts = { tieredModelsEnabled };
   const hasPreventSleep = Object.prototype.hasOwnProperty.call(
     config,
     "preventSleep",
@@ -409,6 +456,7 @@ function normalizeConfig(
   if (hasAgentArgsOverride) {
     const agentArgsOverride = normalizeAgentArgsOverride(
       config.agentArgsOverride,
+      argsOpts,
     );
     if (agentArgsOverride === undefined) {
       delete normalized.agentArgsOverride;
@@ -603,11 +651,21 @@ export function loadConfig(overrides?: Partial<Config>): Config {
     // Config file doesn't exist or is invalid -- use defaults
   }
 
-  const resolvedConfig = {
+  const resolvedConfig: Config = {
     ...DEFAULT_CONFIG,
     ...fileConfig,
     ...normalizeConfig(overrides ?? {}),
   };
+
+  const tieredModels = normalizeTieredModelsConfig(
+    (resolvedConfig as unknown as { tieredModels?: unknown }).tieredModels,
+    resolvedConfig.agent,
+  );
+  if (tieredModels === undefined) {
+    delete (resolvedConfig as { tieredModels?: unknown }).tieredModels;
+  } else {
+    resolvedConfig.tieredModels = tieredModels;
+  }
 
   if (shouldBootstrapConfig) {
     try {

@@ -3,12 +3,19 @@ import {
   type CommitMessageConfig,
 } from "../core/commit-message.js";
 
+export interface TierSelectionPromptInfo {
+  fieldName: string;
+  defaultTier: string;
+  tiers: { name: string; description?: string }[];
+}
+
 export function buildIterationPrompt(params: {
   n: number;
   runId: string;
   prompt: string;
   stopWhen?: string;
   commitMessage?: CommitMessageConfig;
+  tierSelection?: TierSelectionPromptInfo;
 }): string {
   const outputFields = [
     "- success: whether you were able to make a meaningful contribution that got us closer towards the objective. setting this to false means any code change you made should be discarded. A complete no-op iteration (no file changes AND no new meaningful learnings worth recording) is not a success - set success=false so the run can halt rather than spin on no-op iterations",
@@ -35,9 +42,30 @@ export function buildIterationPrompt(params: {
     );
   }
 
+  if (params.tierSelection !== undefined) {
+    const tierNames = params.tierSelection.tiers
+      .map((tier) => `"${tier.name}"`)
+      .join(", ");
+    outputFields.push(
+      `- ${params.tierSelection.fieldName}: which tier the next iteration should use; one of ${tierNames}. Choose the cheapest tier sufficient for the next step. When unsure, use "${params.tierSelection.defaultTier}"`,
+    );
+  }
+
   const stopConditionSection =
     params.stopWhen !== undefined
       ? `\n\n## Stop Condition\n\nThe user has configured a condition to end the loop: ${params.stopWhen}\nIf this condition is fully met after this iteration's work, set should_fully_stop=true in your output. Otherwise set it to false.`
+      : "";
+
+  const tierSelectionSection =
+    params.tierSelection !== undefined
+      ? `\n\n## Tier for the Next Iteration\n\nThis run routes between model tiers per iteration. Pick the cheapest tier sufficient for the next step. Prefer cheaper tiers unless planning, cross-file reasoning, or non-obvious debugging is required. Default to "${params.tierSelection.defaultTier}" when uncertain.\n\nAvailable tiers:\n${params.tierSelection.tiers
+          .map(
+            (tier) =>
+              `- \`${tier.name}\`${tier.description ? `: ${tier.description}` : ""}`,
+          )
+          .join(
+            "\n",
+          )}\n\nReport the selected tier name in \`${params.tierSelection.fieldName}\`.`
       : "";
 
   return `You are working autonomously towards an objective given below.
@@ -54,7 +82,7 @@ This is iteration ${params.n}. Each iteration aims to make an incremental step f
 
 ## Output
 
-${outputFields.join("\n")}${stopConditionSection}
+${outputFields.join("\n")}${stopConditionSection}${tierSelectionSection}
 
 ## Objective
 

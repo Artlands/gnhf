@@ -155,6 +155,12 @@ export class MockOrchestrator extends EventEmitter<OrchestratorEvents> {
     startTime: new Date(Date.now() - INITIAL_ELAPSED_MS),
     waitingUntil: null,
     lastMessage: AGENT_MESSAGES[0],
+    currentTier: "default",
+    inputTokensByTier: {},
+    outputTokensByTier: {},
+    billableInputTokens: 87_300_000,
+    billableOutputTokens: 860_000,
+    tierIterationCounts: {},
   };
 
   private tokenTimer: ReturnType<typeof setTimeout> | null = null;

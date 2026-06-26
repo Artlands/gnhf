@@ -35,6 +35,48 @@ const TEST_REDACT_AGENT_SPEC = (name: string) => {
   return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(target) ? name : "acp:custom";
 };
 
+// Builds the same createAgentProvider shape the real factory returns, while
+// routing every agent construction through the test's `createAgent` mock so
+// existing per-call assertions on createAgent continue to verify the right
+// (spec, runInfo, pathOverride, argsOverride, options) tuple.
+function makeCreateAgentProviderMock(createAgentMock: unknown) {
+  const createAgent = createAgentMock as (...args: unknown[]) => unknown;
+  return vi.fn(
+    (
+      cfg: {
+        agent: string;
+        agentPathOverride?: Record<string, string>;
+        agentArgsOverride?: Record<string, string[]>;
+        acpRegistryOverrides?: Record<string, string>;
+      },
+      runInfo: unknown,
+      options: { acpRegistryOverrides?: Record<string, string> },
+    ) => {
+      const isNative = TEST_AGENT_NAMES.includes(cfg.agent);
+      const pathOverride = isNative
+        ? cfg.agentPathOverride?.[cfg.agent]
+        : undefined;
+      const argsOverride = isNative
+        ? cfg.agentArgsOverride?.[cfg.agent]
+        : undefined;
+      const agent = createAgent(
+        cfg.agent,
+        runInfo,
+        pathOverride,
+        argsOverride,
+        options,
+      ) as { name: string; close?: () => Promise<void> | void };
+      return {
+        defaultTier: "default",
+        tiers: ["default"],
+        tieredModels: undefined,
+        getAgentFor: () => agent,
+        close: agent.close ? agent.close.bind(agent) : () => undefined,
+      };
+    },
+  );
+}
+
 const stubRunInfo: RunInfo = {
   runId: "run-abc",
   runDir: "/repo/.gnhf/runs/run-abc",
@@ -48,6 +90,10 @@ const stubRunInfo: RunInfo = {
   stopWhen: undefined,
   commitMessagePath: "/repo/.gnhf/runs/run-abc/commit-message",
   commitMessage: undefined,
+  tierConfigPath: "/repo/.gnhf/runs/run-abc/tier-config.json",
+  tieredModels: undefined,
+  tierHistoryPath: "/repo/.gnhf/runs/run-abc/tier-history.jsonl",
+  tierPlanPath: "/repo/.gnhf/runs/run-abc/tier-plan.json",
 };
 
 interface CliMockOverrides {
@@ -64,6 +110,7 @@ interface CliMockOverrides {
   listWorktreePaths?: ReturnType<typeof vi.fn>;
   worktreeExists?: ReturnType<typeof vi.fn>;
   getBranchDiffStats?: ReturnType<typeof vi.fn>;
+  setupRun?: ReturnType<typeof vi.fn>;
   peekRunMetadata?: ReturnType<typeof vi.fn>;
   resumeRun?: ReturnType<typeof vi.fn>;
   getLastIterationNumber?: ReturnType<typeof vi.fn>;
@@ -117,7 +164,7 @@ async function runCliWithMocks(
   };
   let consoleErrorCalls: unknown[][] = [];
   let stdoutWriteCalls: unknown[][] = [];
-  const setupRun = vi.fn(() => stubRunInfo);
+  const setupRun = overrides.setupRun ?? vi.fn(() => stubRunInfo);
   const peekRunMetadata = overrides.peekRunMetadata ?? vi.fn(() => stubRunInfo);
   const resumeRun = overrides.resumeRun ?? vi.fn();
   const getLastIterationNumber =
@@ -148,6 +195,12 @@ async function runCliWithMocks(
       startTime: new Date("2026-01-01T00:00:00Z"),
       waitingUntil: null,
       lastMessage: null,
+      currentTier: "default",
+      inputTokensByTier: {},
+      outputTokensByTier: {},
+      billableInputTokens: 0,
+      billableOutputTokens: 0,
+      tierIterationCounts: {},
     }));
 
   const rendererStart = vi.fn();
@@ -203,7 +256,10 @@ async function runCliWithMocks(
     getLastIterationNumber,
   }));
   vi.doMock("./core/stdin.js", () => ({ readStdinText }));
-  vi.doMock("./core/agents/factory.js", () => ({ createAgent }));
+  vi.doMock("./core/agents/factory.js", () => ({
+    createAgent,
+    createAgentProvider: makeCreateAgentProviderMock(createAgent),
+  }));
   vi.doMock("./core/sleep.js", () => ({
     startSleepPrevention,
   }));
@@ -404,9 +460,13 @@ async function runSigintCliTest({
     resumeRun: vi.fn(),
     getLastIterationNumber: vi.fn(() => 0),
   }));
-  vi.doMock("./core/agents/factory.js", () => ({
-    createAgent: vi.fn(() => ({ name: "claude" })),
-  }));
+  vi.doMock("./core/agents/factory.js", () => {
+    const createAgent = vi.fn(() => ({ name: "claude" }));
+    return {
+      createAgent,
+      createAgentProvider: makeCreateAgentProviderMock(createAgent),
+    };
+  });
   vi.doMock("./core/orchestrator.js", () => ({
     Orchestrator: class MockOrchestrator {
       start = vi.fn(() => {
@@ -562,7 +622,10 @@ async function runCliResumeWithActualRun(
     createWorktree: vi.fn(),
     removeWorktree: vi.fn(),
   }));
-  vi.doMock("./core/agents/factory.js", () => ({ createAgent }));
+  vi.doMock("./core/agents/factory.js", () => ({
+    createAgent,
+    createAgentProvider: makeCreateAgentProviderMock(createAgent),
+  }));
   vi.doMock("./core/sleep.js", () => ({
     startSleepPrevention: vi.fn(() =>
       Promise.resolve({ type: "skipped", reason: "unsupported" }),
@@ -672,7 +735,11 @@ describe("cli", () => {
       stubRunInfo,
       undefined,
       ["-m", "gpt-5.4", "--full-auto"],
-      { includeStopField: false, acpRegistryOverrides: {} },
+      {
+        includeStopField: false,
+        topLevelAgent: "codex",
+        acpRegistryOverrides: {},
+      },
     );
   });
 
@@ -694,6 +761,89 @@ describe("cli", () => {
       "run",
       expect.objectContaining({ agent: "acp:custom" }),
     );
+  });
+
+  it("sends aggregate tier telemetry without raw user-defined tier names", async () => {
+    const tieredModels = {
+      enabled: true as const,
+      defaultTier: "company-internal-fast",
+      classifier: { mode: "agent-self" as const },
+      tiers: {
+        "company-internal-fast": { args: { claude: ["--model", "opus"] } },
+        "alice-test-local": {
+          agent: "acp:local-qwen" as const,
+          local: true,
+        },
+      },
+    };
+    const tieredRunInfo: RunInfo = {
+      ...stubRunInfo,
+      tieredModels,
+    };
+    const { telemetry } = await runCliWithMocks(
+      ["ship it"],
+      {
+        agent: "claude",
+        agentPathOverride: {},
+        agentArgsOverride: {},
+        acpRegistryOverrides: {},
+        maxConsecutiveFailures: 3,
+        preventSleep: false,
+        tieredModels,
+      },
+      {
+        setupRun: vi.fn(() => tieredRunInfo),
+        orchestratorGetState: vi.fn(() => ({
+          status: "completed" as const,
+          gracefulStopRequested: false,
+          currentIteration: 2,
+          totalInputTokens: 300,
+          totalOutputTokens: 40,
+          commitCount: 1,
+          iterations: [],
+          successCount: 1,
+          failCount: 0,
+          consecutiveFailures: 0,
+          startTime: new Date("2026-01-01T00:00:00Z"),
+          waitingUntil: null,
+          lastMessage: null,
+          currentTier: "company-internal-fast",
+          inputTokensByTier: {
+            "company-internal-fast": 200,
+            "alice-test-local": 100,
+          },
+          outputTokensByTier: {
+            "company-internal-fast": 30,
+            "alice-test-local": 10,
+          },
+          billableInputTokens: 200,
+          billableOutputTokens: 30,
+          tierIterationCounts: {
+            "company-internal-fast": 1,
+            "alice-test-local": 1,
+          },
+        })),
+      },
+    );
+
+    const payload = telemetry.track.mock.calls[0]?.[1];
+    expect(payload).toEqual(
+      expect.objectContaining({
+        tier_telemetry: {
+          tier_count: 2,
+          local_tier_count: 1,
+          active_tier_count: 2,
+          tier_iterations_total: 2,
+          tier_input_tokens_total: 300,
+          tier_output_tokens_total: 40,
+          billable_input_tokens: 200,
+          billable_output_tokens: 30,
+        },
+      }),
+    );
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain("company-internal-fast");
+    expect(serialized).not.toContain("alice-test-local");
   });
 
   it("prints a permanent exit summary after the run completes", async () => {
@@ -830,6 +980,7 @@ describe("cli", () => {
       undefined,
       {
         includeStopField: true,
+        topLevelAgent: "codex",
         stopWhen: "all tests pass",
         acpRegistryOverrides: {},
       },
@@ -849,6 +1000,7 @@ describe("cli", () => {
 
     const expectedSchemaOptions = {
       includeStopField: false,
+      topLevelAgent: "codex",
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
       commitFields: [
         {
@@ -900,6 +1052,7 @@ describe("cli", () => {
 
     const expectedSchemaOptions = {
       includeStopField: true,
+      topLevelAgent: "codex",
       stopWhen: "all checks pass",
       commitMessage: CONVENTIONAL_COMMIT_MESSAGE,
       commitFields: [
@@ -947,6 +1100,7 @@ describe("cli", () => {
       undefined,
       {
         includeStopField: true,
+        topLevelAgent: "claude",
         stopWhen: "all tests pass",
         acpRegistryOverrides: {},
       },
@@ -1009,7 +1163,11 @@ describe("cli", () => {
       expect.objectContaining({ stopWhen: undefined }),
       undefined,
       undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
+      {
+        includeStopField: false,
+        topLevelAgent: "claude",
+        acpRegistryOverrides: {},
+      },
     );
     expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
       maxIterations: undefined,
@@ -1033,7 +1191,11 @@ describe("cli", () => {
       expect.objectContaining({ commitMessage: undefined }),
       undefined,
       undefined,
-      { includeStopField: false, acpRegistryOverrides: {} },
+      {
+        includeStopField: false,
+        topLevelAgent: "claude",
+        acpRegistryOverrides: {},
+      },
     );
     expect(orchestratorCtor.mock.calls[0]?.[0]).toMatchObject({
       commitMessage: undefined,
@@ -1177,7 +1339,7 @@ describe("cli", () => {
       "ship it",
       "abc123",
       process.cwd(),
-      { includeStopField: false },
+      { includeStopField: false, topLevelAgent: "claude" },
     );
     expect(orchestratorCtor.mock.calls[0]?.[4]).toBe(process.cwd());
   });
@@ -1214,6 +1376,7 @@ describe("cli", () => {
 
       expect(resumeRun).toHaveBeenCalledWith(runId, effectiveTempDir, {
         includeStopField: false,
+        topLevelAgent: "claude",
       });
       expect(setupRun).not.toHaveBeenCalled();
       expect(getLastIterationNumber).toHaveBeenCalledWith(
@@ -1262,6 +1425,7 @@ describe("cli", () => {
       expect(ensureCleanWorkingTree).toHaveBeenCalledWith(effectiveTempDir);
       expect(resumeRun).toHaveBeenCalledWith(runId, effectiveTempDir, {
         includeStopField: false,
+        topLevelAgent: "claude",
       });
     } finally {
       process.chdir(originalCwd);
@@ -1584,9 +1748,13 @@ describe("cli", () => {
     vi.doMock("./core/stdin.js", () => ({
       readStdinText: vi.fn(() => Promise.resolve("")),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -1738,9 +1906,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -1875,9 +2047,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2008,9 +2184,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2136,9 +2316,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2261,9 +2445,13 @@ describe("cli", () => {
       })),
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention,
     }));
@@ -2379,9 +2567,13 @@ describe("cli", () => {
       resumeRun,
       getLastIterationNumber: vi.fn(() => 3),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/sleep.js", () => ({
       startSleepPrevention: vi.fn(),
     }));
@@ -2437,13 +2629,14 @@ describe("cli", () => {
       expect(resumeRun).toHaveBeenCalledTimes(1);
       expect(resumeRun).toHaveBeenCalledWith("existing-run", process.cwd(), {
         includeStopField: false,
+        topLevelAgent: "claude",
       });
       expect(setupRun).toHaveBeenCalledWith(
         "existing-run",
         "new prompt",
         "abc123",
         process.cwd(),
-        { includeStopField: false },
+        { includeStopField: false, topLevelAgent: "claude" },
       );
       expect(orchestratorCtor).toHaveBeenCalledTimes(1);
       expect(orchestratorCtor.mock.calls[0]?.[5]).toBe(3);
@@ -2551,9 +2744,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/orchestrator.js", () => ({
       Orchestrator: class MockOrchestrator {
         start = vi.fn(() => new Promise<void>(() => {}));
@@ -2698,9 +2895,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/orchestrator.js", () => ({
       Orchestrator: class MockOrchestrator {
         start = vi.fn(
@@ -2872,9 +3073,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doMock("./core/orchestrator.js", () => ({
       Orchestrator: class MockOrchestrator {
         start = vi.fn(() => Promise.resolve());
@@ -3025,9 +3230,13 @@ describe("cli", () => {
       resumeRun: vi.fn(),
       getLastIterationNumber: vi.fn(() => 0),
     }));
-    vi.doMock("./core/agents/factory.js", () => ({
-      createAgent: vi.fn(() => ({ name: "claude" })),
-    }));
+    vi.doMock("./core/agents/factory.js", () => {
+      const createAgent = vi.fn(() => ({ name: "claude" }));
+      return {
+        createAgent,
+        createAgentProvider: makeCreateAgentProviderMock(createAgent),
+      };
+    });
     vi.doUnmock("./renderer.js");
     vi.doMock("./core/orchestrator.js", () => {
       return {
@@ -3267,7 +3476,7 @@ describe("cli", () => {
       expect(resumeRun).toHaveBeenCalledWith(
         suffixedRunId,
         suffixedWorktreePath,
-        { includeStopField: false },
+        { includeStopField: false, topLevelAgent: "claude" },
       );
       expect(createWorktree).not.toHaveBeenCalled();
       expect(orchestratorCtor.mock.calls[0]?.[4]).toBe(suffixedWorktreePath);
@@ -3321,10 +3530,12 @@ describe("cli", () => {
 
       expect(resumeRun).toHaveBeenCalledWith(runId, worktreePath, {
         includeStopField: false,
+        topLevelAgent: "claude",
         clearStopWhen: true,
       });
       expect(createAgent.mock.calls[0]?.[4]).toEqual({
         includeStopField: false,
+        topLevelAgent: "claude",
         acpRegistryOverrides: {},
       });
       expect(orchestratorCtor.mock.calls[0]?.[6]).toEqual({
@@ -3387,7 +3598,7 @@ describe("cli", () => {
       expect(resumeRun).toHaveBeenCalledWith(
         suffixedRunId,
         suffixedWorktreePath,
-        { includeStopField: false },
+        { includeStopField: false, topLevelAgent: "claude" },
       );
       expect(createWorktree).not.toHaveBeenCalled();
       expect(orchestratorCtor.mock.calls[0]?.[4]).toBe(suffixedWorktreePath);
@@ -3442,6 +3653,7 @@ describe("cli", () => {
 
       expect(createAgent.mock.calls[0]?.[4]).toEqual({
         includeStopField: false,
+        topLevelAgent: "claude",
         acpRegistryOverrides: {},
       });
       expect(orchestratorCtor.mock.calls[0]?.[0]).toEqual(

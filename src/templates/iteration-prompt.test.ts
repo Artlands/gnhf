@@ -100,6 +100,41 @@ describe("buildIterationPrompt", () => {
     expect(result).toContain('default: ""');
   });
 
+  it("adds a tier-selection section and next_iteration_tier output field when tierSelection is set", () => {
+    const result = buildIterationPrompt({
+      n: 1,
+      runId: "run-1",
+      prompt: "do stuff",
+      tierSelection: {
+        fieldName: "next_iteration_tier",
+        defaultTier: "complex",
+        tiers: [
+          { name: "complex", description: "planning, design decisions" },
+          { name: "simple", description: "mechanical edits" },
+          { name: "cheap" },
+        ],
+      },
+    });
+
+    expect(result).toContain("## Tier for the Next Iteration");
+    expect(result).toContain("`complex`: planning, design decisions");
+    expect(result).toContain("`simple`: mechanical edits");
+    expect(result).toContain("`cheap`");
+    expect(result).toContain('Default to "complex"');
+    expect(result).toContain("next_iteration_tier");
+  });
+
+  it("omits the tier-selection section when tierSelection is not provided", () => {
+    const baseline = buildIterationPrompt({
+      n: 1,
+      runId: "run-1",
+      prompt: "do stuff",
+    });
+
+    expect(baseline).not.toContain("Tier for the Next Iteration");
+    expect(baseline).not.toContain("next_iteration_tier");
+  });
+
   it("warns the agent that complete no-op iterations should report success=false", () => {
     // Without this guardrail, an agent that converges (no further useful
     // work) keeps reporting success=true with empty key_changes_made,

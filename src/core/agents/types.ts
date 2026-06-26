@@ -4,6 +4,7 @@ export interface AgentOutput {
   key_changes_made: unknown;
   key_learnings: unknown;
   should_fully_stop?: boolean;
+  next_iteration_tier?: string;
 }
 
 export interface AgentOutputSchema {
@@ -14,6 +15,11 @@ export interface AgentOutputSchema {
     { type: string; items?: { type: string }; enum?: string[] }
   >;
   required: string[];
+}
+
+export interface AgentOutputTierField {
+  name: string;
+  allowed: string[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -89,6 +95,7 @@ export interface AgentOutputCommitField {
 export function buildAgentOutputSchema(opts: {
   includeStopField: boolean;
   commitFields?: AgentOutputCommitField[];
+  tierField?: AgentOutputTierField;
 }): AgentOutputSchema {
   const properties: AgentOutputSchema["properties"] = {
     success: { type: "boolean" },
@@ -107,6 +114,13 @@ export function buildAgentOutputSchema(opts: {
   if (opts.includeStopField) {
     properties.should_fully_stop = { type: "boolean" };
     required.push("should_fully_stop");
+  }
+  if (opts.tierField) {
+    properties[opts.tierField.name] = {
+      type: "string",
+      enum: opts.tierField.allowed,
+    };
+    required.push(opts.tierField.name);
   }
   return {
     type: "object",

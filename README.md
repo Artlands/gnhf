@@ -157,7 +157,7 @@ After installing from npm, the skill is available under the installed package di
 - **Graceful interrupts** - in the interactive TUI, the first Ctrl+C requests a graceful stop and lets the current iteration finish (or ends backoff early), the second Ctrl+C force-stops immediately, and `SIGTERM` also force-stops immediately
 - **Exit summary** - after shutdown cleanup, gnhf prints a permanent stdout summary with the final branch, elapsed time, iteration and token totals, branch diff stats, notes/debug-log paths, and review commands
 - **Shared memory** — the agent reads `notes.md` (built up from prior iterations) to communicate across iterations
-- **Local run metadata** — gnhf stores prompt, notes, stop conditions, and commit-message convention metadata under `.gnhf/runs/` and ignores it locally, so your branch only contains intentional work
+- **Local run metadata** — gnhf stores prompt, notes, stop conditions, commit-message convention metadata, and enabled tiered-model configuration under `.gnhf/runs/` and ignores it locally, so your branch only contains intentional work
 - **Resume support** — run `gnhf` while on an existing `gnhf/` branch to pick up where a previous run left off; if you provide a different prompt, gnhf asks whether to update the saved prompt and continue with the existing history, start a new branch, or quit. New runs whose generated branch already exists use a numeric suffix such as `gnhf/<slug>-1`.
 
 ### Live Branch Mode
@@ -211,6 +211,8 @@ If you run `gnhf` on an existing `gnhf/` branch with a different prompt, gnhf as
 | `--worktree`             | Run in a separate git worktree (enables multiple agents concurrently)                                  | `false`                |
 | `--current-branch`       | Run on the current branch instead of creating a `gnhf/` branch                                         | `false`                |
 | `--push`                 | Push the current branch after each successful iteration                                                | `false`                |
+| `--tier <name>`          | Pin this run to the given tier (requires `tieredModels.enabled`)                                        | classifier mode       |
+| `--no-classifier`        | Disable the tier classifier for this run (equivalent to `classifier.mode=off`)                          | classifier on         |
 | `--meteor-frequency <n>` | Set TUI meteor frequency from 0 to 5 (`0` disables meteors)                                            | `3`                    |
 | `--version`              | Show version                                                                                           |                        |
 
@@ -253,6 +255,33 @@ agent: claude
 #   my-fork: "/usr/local/bin/my-claude-code-fork --acp"
 #   staging: "node /opt/staging/agent.mjs"
 
+# Experimental tiered model infrastructure (optional)
+# When enabled, agent-self mode selects the next iteration's tier via an
+# upfront classifier call; router mode plans all tiers at once.
+# tieredModels:
+#   enabled: false
+#   defaultTier: complex
+#   classifier:
+#     mode: off
+#   tiers:
+#     complex:
+#       description: "Planning-heavy work"
+#       args:
+#         claude:
+#           - --model
+#           - opus
+#     simple:
+#       description: "Mechanical edits"
+#       args:
+#         claude:
+#           - --model
+#           - sonnet
+#     cheap:
+#       agent: "acp:local-qwen"
+#       local: true
+#       acpRegistryOverrides:
+#         local-qwen: "/usr/local/bin/qwen-acp"
+
 # Commit message convention (optional)
 # Defaults to: gnhf <iteration>: <summary>
 # Use the conventional preset for semantic-release compatible headers:
@@ -277,8 +306,18 @@ Use `acpRegistryOverrides` to map `acp:<target>` names to custom spawn commands 
 You can also pass a raw custom ACP server command directly as a quoted `acp:` spec, for example `gnhf --agent 'acp:./bin/dev-acp --profile ci' "fix the tests"`.
 
 - Use it for agent-specific options like models, profiles, or reasoning settings without adding a dedicated `gnhf` config field for each one.
+- When `tieredModels.enabled` is true, model-selection flags for `claude`, `codex`, `copilot`, and `pi` move from top-level `agentArgsOverride` into `tieredModels.tiers.<name>.args.<agent>`.
 - For `codex`, `claude`, and `copilot`, `gnhf` adds its usual non-interactive permission default only when you do not provide your own permission or execution-mode flag. If you set one explicitly, `gnhf` treats that as user-managed and does not add its default on top.
 - Flags that `gnhf` manages itself for a given agent, such as output-shaping or local-server startup flags, are rejected during config loading so you get a clear error instead of duplicate-argument ambiguity. For `pi` specifically, `--api-key` is also blocked; configure the Pi API key via Pi's own config or the environment variable it reads, not via `agentArgsOverride`.
+
+`tieredModels` is experimental infrastructure for per-tier agent and model configuration. It is off by default. When enabled, the resolved tier block is frozen into `.gnhf/runs/<runId>/tier-config.json` for consistency across resumes. With `classifier.mode: off` (the default), every iteration uses `defaultTier`. Classifier modes (`agent-self`, `router`, `router+self`) enable automatic per-iteration tier selection via an upfront LLM call.
+
+- `tiers` is a non-empty map of tier names matching `^[a-zA-Z][a-zA-Z0-9_-]*$`; `default` is reserved, and `defaultTier` must name one configured tier.
+- A tier can set `args` for the effective native agent, or set `agent` for a whole-agent swap. Top-level `agentPathOverride` and non-model `agentArgsOverride` for the effective native agent still apply.
+- Tier `args` may include model-selection flags such as Claude/Copilot/Pi `--model` or Codex `-m`/`--model`, but still cannot override flags managed by `gnhf` itself.
+- `acpRegistryOverrides` inside a tier merges with the top-level ACP overrides, with the tier value winning for duplicate names.
+- If the top-level agent is `rovodev`, `opencode`, or `acp:<...>`, every tier must set `agent`; these agents do not support args-only tiering.
+- `classifier.mode` accepts `off`, `agent-self`, `router`, or `router+self`; router modes require `classifier.routerTier`. `agent-self` selects the next iteration's tier via an upfront classifier call; `router` plans all tiers upfront; `router+self` combines a router plan with per-iteration self-correction.
 
 `commitMessage` controls the subject line that gnhf uses for each successful iteration commit.
 

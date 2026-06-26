@@ -12,13 +12,18 @@ import { execFileSync } from "node:child_process";
 import {
   buildAgentOutputSchema,
   type AgentOutputCommitField,
+  type AgentOutputTierField,
 } from "./agents/types.js";
 import {
   CONVENTIONAL_COMMIT_MESSAGE,
   getCommitMessageSchemaFields,
   type CommitMessageConfig,
 } from "./commit-message.js";
+import { InvalidConfigError } from "./config-errors.js";
 import { findLegacyRunBaseCommit, getHeadCommit } from "./git.js";
+import type { AgentSpec } from "./config.js";
+import { normalizeTieredModelsConfig } from "./tiered-models-config.js";
+import type { TieredModelsConfig } from "./tiered-models.js";
 
 export interface RunInfo {
   runId: string;
@@ -33,6 +38,10 @@ export interface RunInfo {
   stopWhen: string | undefined;
   commitMessagePath: string;
   commitMessage: CommitMessageConfig | undefined;
+  tierConfigPath: string;
+  tieredModels: TieredModelsConfig | undefined;
+  tierHistoryPath: string;
+  tierPlanPath: string;
 }
 
 export interface RunMetadata {
@@ -47,6 +56,16 @@ export interface RunMetadata {
 const LOG_FILENAME = "gnhf.log";
 const STOP_WHEN_FILENAME = "stop-when";
 const COMMIT_MESSAGE_FILENAME = "commit-message";
+const TIER_CONFIG_FILENAME = "tier-config.json";
+const TIER_HISTORY_FILENAME = "tier-history.jsonl";
+const TIER_PLAN_FILENAME = "tier-plan.json";
+
+export interface TierPlan {
+  tiers: string[];
+  plan: string[];
+  rationale: string;
+  consumed: number;
+}
 
 function writeSchemaFile(
   schemaPath: string,
@@ -58,6 +77,9 @@ function writeSchemaFile(
       buildAgentOutputSchema({
         includeStopField: schemaOptions.includeStopField,
         commitFields: schemaOptions.commitFields,
+        ...(schemaOptions.tierField === undefined
+          ? {}
+          : { tierField: schemaOptions.tierField }),
       }),
       null,
       2,
@@ -72,6 +94,9 @@ export interface RunSchemaOptions {
   commitMessage?: CommitMessageConfig;
   stopWhen?: string;
   clearStopWhen?: boolean;
+  tierField?: AgentOutputTierField;
+  tieredModels?: TieredModelsConfig;
+  topLevelAgent?: AgentSpec;
 }
 
 function readStopWhen(stopWhenPath: string): string | undefined {
@@ -154,6 +179,56 @@ function writeCommitMessageMetadata(
   );
 }
 
+function writeTierConfigMetadata(
+  tierConfigPath: string,
+  tieredModels: TieredModelsConfig | undefined,
+): void {
+  if (tieredModels === undefined) return;
+  writeFileSync(
+    tierConfigPath,
+    `${JSON.stringify(tieredModels, null, 2)}\n`,
+    "utf-8",
+  );
+}
+
+function materializeTierConfigFallbackAgents(
+  tieredModels: TieredModelsConfig,
+  topLevelAgent: AgentSpec,
+): TieredModelsConfig {
+  return {
+    ...tieredModels,
+    tiers: Object.fromEntries(
+      Object.entries(tieredModels.tiers).map(([name, tier]) => [
+        name,
+        { ...tier, agent: tier.agent ?? topLevelAgent },
+      ]),
+    ),
+  };
+}
+
+function readTierConfigMetadata(
+  tierConfigPath: string,
+  topLevelAgent: AgentSpec = "claude",
+): TieredModelsConfig | undefined {
+  if (!existsSync(tierConfigPath)) return undefined;
+  const raw = readFileSync(tierConfigPath, "utf-8");
+  if (raw.trim() === "") return undefined;
+  try {
+    const tieredModels = normalizeTieredModelsConfig(
+      JSON.parse(raw),
+      topLevelAgent,
+    );
+    return tieredModels === undefined
+      ? undefined
+      : materializeTierConfigFallbackAgents(tieredModels, topLevelAgent);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new InvalidConfigError(
+      `Invalid run metadata in ${tierConfigPath}: ${message}`,
+    );
+  }
+}
+
 function ensureRunMetadataIgnored(cwd: string): void {
   const excludePath = execFileSync(
     "git",
@@ -225,6 +300,20 @@ export function setupRun(
   const commitMessage = schemaOptions.commitMessage;
   writeCommitMessageMetadata(commitMessagePath, commitMessage);
 
+  const tierConfigPath = join(runDir, TIER_CONFIG_FILENAME);
+  const hasStoredTierConfig = existsSync(tierConfigPath);
+  const tieredModels = hasStoredTierConfig
+    ? readTierConfigMetadata(tierConfigPath, schemaOptions.topLevelAgent)
+    : schemaOptions.tieredModels === undefined
+      ? undefined
+      : materializeTierConfigFallbackAgents(
+          schemaOptions.tieredModels,
+          schemaOptions.topLevelAgent ?? "claude",
+        );
+  if (!hasStoredTierConfig && schemaOptions.tieredModels !== undefined) {
+    writeTierConfigMetadata(tierConfigPath, tieredModels);
+  }
+
   return {
     runId,
     runDir,
@@ -238,6 +327,10 @@ export function setupRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    tierConfigPath,
+    tieredModels,
+    tierHistoryPath: join(runDir, TIER_HISTORY_FILENAME),
+    tierPlanPath: join(runDir, TIER_PLAN_FILENAME),
   };
 }
 
@@ -270,6 +363,14 @@ export function resumeRun(
   }
   const commitMessagePath = join(runDir, COMMIT_MESSAGE_FILENAME);
   const commitMessage = resolveRunCommitMessage(commitMessagePath, schemaPath);
+  const tierConfigPath = join(runDir, TIER_CONFIG_FILENAME);
+  // Absence is the backwards-compat signal for "tiered models off for this
+  // run" — older runs started before this feature shipped have no
+  // tier-config.json. Frozen tier config on disk wins over live config.
+  const tieredModels = readTierConfigMetadata(
+    tierConfigPath,
+    schemaOptions.topLevelAgent,
+  );
   writeSchemaFile(schemaPath, {
     ...schemaOptions,
     commitMessage,
@@ -290,6 +391,10 @@ export function resumeRun(
     stopWhen,
     commitMessagePath,
     commitMessage,
+    tierConfigPath,
+    tieredModels,
+    tierHistoryPath: join(runDir, TIER_HISTORY_FILENAME),
+    tierPlanPath: join(runDir, TIER_PLAN_FILENAME),
   };
 }
 
@@ -358,6 +463,58 @@ export function toStringArray(value: unknown): string[] {
 function formatListSection(title: string, items: string[]): string {
   if (items.length === 0) return "";
   return `**${title}:**\n${items.map((item) => `- ${item}`).join("\n")}\n`;
+}
+
+export type TierHistorySource =
+  | "default"
+  | "self"
+  | "classifier"
+  | "override"
+  | "failure-fallback"
+  | "commit-repair"
+  | "agent-error"
+  | "router";
+
+export interface TierHistoryEntry {
+  iteration: number;
+  tier: string;
+  source: TierHistorySource;
+}
+
+export function appendTierHistory(
+  tierHistoryPath: string,
+  entry: TierHistoryEntry,
+): void {
+  const line = `${JSON.stringify({ ...entry, ts: new Date().toISOString() })}\n`;
+  appendFileSync(tierHistoryPath, line, "utf-8");
+}
+
+export function writeTierPlan(tierPlanPath: string, plan: TierPlan): void {
+  writeFileSync(tierPlanPath, `${JSON.stringify(plan, null, 2)}\n`, "utf-8");
+}
+
+export function readTierPlan(tierPlanPath: string): TierPlan | null {
+  try {
+    if (!existsSync(tierPlanPath)) return null;
+    const raw = readFileSync(tierPlanPath, "utf-8").trim();
+    if (raw === "") return null;
+    const parsed = JSON.parse(raw) as TierPlan;
+    if (
+      !Array.isArray(parsed.tiers) ||
+      !Array.isArray(parsed.plan) ||
+      typeof parsed.rationale !== "string" ||
+      typeof parsed.consumed !== "number"
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function deleteTierPlan(tierPlanPath: string): void {
+  rmSync(tierPlanPath, { force: true });
 }
 
 export function appendNotes(
